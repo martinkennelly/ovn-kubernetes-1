@@ -163,6 +163,14 @@ var metricEgressIPCount = prometheus.NewGauge(prometheus.GaugeOpts{
 	Help: "The total number of egress IPs defined",
 })
 
+var metricEgressFirewallRulesCount = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+	Namespace: MetricOvnNamespace,
+	Subsystem: MetricOvnkubeSubsystemMaster,
+	Name: "num_egress_firewall_rules",
+	Help: "The total number of egress firewalls rules defined per namespace"},
+	[]string{"namespace"},
+)
+
 var registerMasterMetricsOnce sync.Once
 var startE2ETimeStampUpdaterOnce sync.Once
 
@@ -238,6 +246,7 @@ func RegisterMasterMetrics(nbClient, sbClient goovn.Client) {
 		prometheus.MustRegister(metricV4AllocatedHostSubnetCount)
 		prometheus.MustRegister(metricV6AllocatedHostSubnetCount)
 		prometheus.MustRegister(metricEgressIPCount)
+		prometheus.MustRegister(metricEgressFirewallRulesCount)
 		registerWorkqueueMetrics(MetricOvnkubeNamespace, MetricOvnkubeSubsystemMaster)
 	})
 }
@@ -313,4 +322,9 @@ func RecordSubnetCount(v4SubnetCount, v6SubnetCount float64) {
 // This total may include multiple Egress IPs per EgressIP CR.
 func RecordEgressIPCount(count float64) {
 	metricEgressIPCount.Set(count)
+}
+
+// RecordEgressFirewallRulesCount records the total number of Egress firewall rules.
+func RecordEgressFirewallRulesCount(namespace string, count float64) {
+	metricEgressFirewallRulesCount.WithLabelValues(namespace).Set(count)
 }
