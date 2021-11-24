@@ -44,56 +44,19 @@ var metricDBSize = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 	},
 )
 
-// ClusterStatus metrics
-var metricDBClusterCID = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+var metricDBClusterServer = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 	Namespace: MetricOvnNamespace,
 	Subsystem: MetricOvnSubsystemDB,
-	Name:      "cluster_id",
-	Help:      "A metric with a constant '1' value labeled by database name and cluster uuid"},
-	[]string{
-		"db_name",
-		"cluster_id",
-	},
-)
-
-var metricDBClusterSID = prometheus.NewGaugeVec(prometheus.GaugeOpts{
-	Namespace: MetricOvnNamespace,
-	Subsystem: MetricOvnSubsystemDB,
-	Name:      "cluster_server_id",
-	Help: "A metric with a constant '1' value labeled by database name, cluster uuid " +
-		"and server uuid"},
-	[]string{
-		"db_name",
-		"cluster_id",
-		"server_id",
-	},
-)
-
-var metricDBClusterServerStatus = prometheus.NewGaugeVec(prometheus.GaugeOpts{
-	Namespace: MetricOvnNamespace,
-	Subsystem: MetricOvnSubsystemDB,
-	Name:      "cluster_server_status",
-	Help: "A metric with a constant '1' value labeled by database name, cluster uuid, server uuid " +
-		"server status"},
+	Name:      "cluster_server_info",
+	Help: "A metric with a constant '1' value labeled by database name, cluster uuid, server uuid, " +
+		"server status, server role and server vote."},
 	[]string{
 		"db_name",
 		"cluster_id",
 		"server_id",
 		"server_status",
-	},
-)
-
-var metricDBClusterServerRole = prometheus.NewGaugeVec(prometheus.GaugeOpts{
-	Namespace: MetricOvnNamespace,
-	Subsystem: MetricOvnSubsystemDB,
-	Name:      "cluster_server_role",
-	Help: "A metric with a constant '1' value labeled by database name, cluster uuid, server uuid " +
-		"and server role"},
-	[]string{
-		"db_name",
-		"cluster_id",
-		"server_id",
 		"server_role",
+		"server_vote",
 	},
 )
 
@@ -107,20 +70,6 @@ var metricDBClusterTerm = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		"db_name",
 		"cluster_id",
 		"server_id",
-	},
-)
-
-var metricDBClusterServerVote = prometheus.NewGaugeVec(prometheus.GaugeOpts{
-	Namespace: MetricOvnNamespace,
-	Subsystem: MetricOvnSubsystemDB,
-	Name:      "cluster_server_vote",
-	Help: "A metric with a constant '1' value labeled by database name, cluster uuid, server uuid " +
-		"and server vote"},
-	[]string{
-		"db_name",
-		"cluster_id",
-		"server_id",
-		"server_vote",
 	},
 )
 
@@ -392,12 +341,8 @@ func RegisterOvnDBMetrics(clientset kubernetes.Interface, k8sNodeName string) {
 		dbIsClustered = false
 	}
 	if dbIsClustered {
-		ovnRegistry.MustRegister(metricDBClusterCID)
-		ovnRegistry.MustRegister(metricDBClusterSID)
-		ovnRegistry.MustRegister(metricDBClusterServerStatus)
+		ovnRegistry.MustRegister(metricDBClusterServer)
 		ovnRegistry.MustRegister(metricDBClusterTerm)
-		ovnRegistry.MustRegister(metricDBClusterServerRole)
-		ovnRegistry.MustRegister(metricDBClusterServerVote)
 		ovnRegistry.MustRegister(metricDBClusterElectionTimer)
 		ovnRegistry.MustRegister(metricDBClusterLogIndexStart)
 		ovnRegistry.MustRegister(metricDBClusterLogIndexNext)
@@ -543,15 +488,9 @@ func ovnDBClusterStatusMetricsUpdater(direction, database string) {
 		klog.Errorf(err.Error())
 		return
 	}
-	metricDBClusterCID.WithLabelValues(database, clusterStatus.cid).Set(1)
-	metricDBClusterSID.WithLabelValues(database, clusterStatus.cid, clusterStatus.sid).Set(1)
-	metricDBClusterServerStatus.WithLabelValues(database, clusterStatus.cid, clusterStatus.sid,
-		clusterStatus.status).Set(1)
+	metricDBClusterServer.WithLabelValues(database, clusterStatus.cid, clusterStatus.sid, clusterStatus.status,
+		clusterStatus.role, clusterStatus.vote).Set(1)
 	metricDBClusterTerm.WithLabelValues(database, clusterStatus.cid, clusterStatus.sid).Set(clusterStatus.term)
-	metricDBClusterServerRole.WithLabelValues(database, clusterStatus.cid, clusterStatus.sid,
-		clusterStatus.role).Set(1)
-	metricDBClusterServerVote.WithLabelValues(database, clusterStatus.cid, clusterStatus.sid,
-		clusterStatus.vote).Set(1)
 	metricDBClusterElectionTimer.WithLabelValues(database, clusterStatus.cid,
 		clusterStatus.sid).Set(clusterStatus.electionTimer)
 	metricDBClusterLogIndexStart.WithLabelValues(database, clusterStatus.cid,
