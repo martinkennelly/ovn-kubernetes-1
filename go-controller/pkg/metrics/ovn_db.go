@@ -2,6 +2,7 @@ package metrics
 
 import (
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -135,6 +136,21 @@ var metricDBClusterElectionTimer = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		"db_name",
 		"cluster_id",
 		"server_id",
+	},
+)
+
+var metricDBClusterLastElection = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+	Namespace: MetricOvnNamespace,
+	Subsystem: MetricOvnSubsystemDB,
+	Name:      "cluster_last_election_seconds",
+	Help: "A metric that returns the time since the last RAFT election labeled with database name, cluster uuid, " +
+		"server uuid, server_role and reason for the election."},
+	[]string{
+		"db_name",
+		"cluster_id",
+		"server_id",
+		"server_role",
+		"reason",
 	},
 )
 
@@ -381,6 +397,7 @@ func RegisterOvnDBMetrics(clientset kubernetes.Interface, k8sNodeName string) {
 		ovnRegistry.MustRegister(metricDBClusterServerRole)
 		ovnRegistry.MustRegister(metricDBClusterServerVote)
 		ovnRegistry.MustRegister(metricDBClusterElectionTimer)
+		ovnRegistry.MustRegister(metricDBClusterLastElection)
 		ovnRegistry.MustRegister(metricDBClusterLogIndexStart)
 		ovnRegistry.MustRegister(metricDBClusterLogIndexNext)
 		ovnRegistry.MustRegister(metricDBClusterLogNotCommitted)
@@ -419,12 +436,23 @@ func RegisterOvnDBMetrics(clientset kubernetes.Interface, k8sNodeName string) {
 	}()
 }
 
+// lastElection is information about the last RAFT election which is only available from RAFT leaders and not followers.
+type lastElection struct {
+	// seconds since last election
+	since float64
+	// reason for the last election i.e. timeout, leadership_transfer, etc.
+	reason string
+	// found is true if 'Last Election won' is available. This will be false for followers.
+	found bool
+}
+
 type OVNDBClusterStatus struct {
 	cid             string
 	sid             string
 	status          string
 	role            string
 	vote            string
+	lastElection    lastElection
 	term            float64
 	electionTimer   float64
 	logIndexStart   float64
@@ -520,7 +548,25 @@ func getOVNDBClusterStatusInfo(timeout int, direction, database string) (cluster
 			clusterStatus.connOut = connOut
 			clusterStatus.connInErr = connInErr
 			clusterStatus.connOutErr = connOutErr
+		case "Last Election won":
+			if lastElectionValues := strings.Fields(line[idx+2:]); len(lastElectionValues) > 0 {
+				if lastElectionMilliSec, err := strconv.ParseFloat(lastElectionValues[0], 64); err != nil {
+					klog.Errorf("failed to parse 'Last Election won' time: %v", err)
+				} else {
+					clusterStatus.lastElection.since = lastElectionMilliSec / 1000
+					clusterStatus.lastElection.found = true
+				}
+			} else {
+				klog.Errorf("failed to get 'Last Election won' time. Expected a value.")
+			}
 		}
+		if strings.HasSuffix(line[:idx], "reason") {
+			clusterStatus.lastElection.reason = line[idx+2:]
+		}
+	}
+	// OVSDB cluster followers will not contain the last election time or a reason. Lets mark the value as missing via NaN.
+	if !clusterStatus.lastElection.found {
+		clusterStatus.lastElection.since = math.NaN()
 	}
 
 	return clusterStatus, nil
@@ -543,6 +589,9 @@ func ovnDBClusterStatusMetricsUpdater(direction, database string) {
 		clusterStatus.vote).Set(1)
 	metricDBClusterElectionTimer.WithLabelValues(database, clusterStatus.cid,
 		clusterStatus.sid).Set(clusterStatus.electionTimer)
+	// A valid value is set only if the OVSDB is the leader else Not a value (Nan) is set.
+	metricDBClusterLastElection.WithLabelValues(database, clusterStatus.cid, clusterStatus.sid, clusterStatus.role,
+		clusterStatus.lastElection.reason).Set(clusterStatus.lastElection.since)
 	metricDBClusterLogIndexStart.WithLabelValues(database, clusterStatus.cid,
 		clusterStatus.sid).Set(clusterStatus.logIndexStart)
 	metricDBClusterLogIndexNext.WithLabelValues(database, clusterStatus.cid,
