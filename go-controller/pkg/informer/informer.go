@@ -275,7 +275,7 @@ func (e *eventHandler) processNextWorkItem() bool {
 			return fmt.Errorf("expected string in workqueue but got %#v", obj)
 		}
 
-		// Run the syncHandler, passing it the namespace/name string of the
+		// run the syncHandler, passing it the namespace/name string of the
 		// resource to be synced.
 		if err := e.syncHandler(key); err != nil {
 			// Put the item back on the workqueue to handle any transient errors

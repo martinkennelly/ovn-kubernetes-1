@@ -625,18 +625,18 @@ func TestDefaultExecRunner_RunCmd(t *testing.T) {
 			cmd:         mockCmd,
 			envVars:     []string{"OVN_NB_DAEMON=/some/blah/path"},
 			onRetArgsCmdList: []ovntest.TestifyMockHelper{
-				{OnCallMethodName: "Run", OnCallMethodArgType: []string{}, RetArgList: []interface{}{nil}},
+				{OnCallMethodName: "run", OnCallMethodArgType: []string{}, RetArgList: []interface{}{nil}},
 				{OnCallMethodName: "SetStdout", OnCallMethodArgType: []string{"*bytes.Buffer"}, RetArgList: nil},
 				{OnCallMethodName: "SetStderr", OnCallMethodArgType: []string{"*bytes.Buffer"}, RetArgList: nil},
 				{OnCallMethodName: "SetEnv", OnCallMethodArgType: []string{"[]string"}, RetArgList: nil},
 			},
 		},
 		{
-			desc:        "cmd.Run returns error test",
+			desc:        "cmd.run returns error test",
 			expectedErr: fmt.Errorf("mock error"),
 			cmd:         mockCmd,
 			onRetArgsCmdList: []ovntest.TestifyMockHelper{
-				{OnCallMethodName: "Run", OnCallMethodArgType: []string{}, RetArgList: []interface{}{fmt.Errorf("mock error")}},
+				{OnCallMethodName: "run", OnCallMethodArgType: []string{}, RetArgList: []interface{}{fmt.Errorf("mock error")}},
 				{OnCallMethodName: "SetStdout", OnCallMethodArgType: []string{"*bytes.Buffer"}, RetArgList: nil},
 				{OnCallMethodName: "SetStderr", OnCallMethodArgType: []string{"*bytes.Buffer"}, RetArgList: nil},
 			},
@@ -778,7 +778,7 @@ func TestRunCmd(t *testing.T) {
 			cmdPath:     "ip",
 			cmdArg:      "a",
 			onRetArgsCmdList: []ovntest.TestifyMockHelper{
-				{OnCallMethodName: "Run", OnCallMethodArgType: []string{}, RetArgList: []interface{}{nil}},
+				{OnCallMethodName: "run", OnCallMethodArgType: []string{}, RetArgList: []interface{}{nil}},
 				{OnCallMethodName: "SetStdout", OnCallMethodArgType: []string{"*bytes.Buffer"}, RetArgList: nil},
 				{OnCallMethodName: "SetStderr", OnCallMethodArgType: []string{"*bytes.Buffer"}, RetArgList: nil},
 			},
@@ -789,7 +789,7 @@ func TestRunCmd(t *testing.T) {
 			cmdPath:     "ips",
 			cmdArg:      "addr",
 			onRetArgsCmdList: []ovntest.TestifyMockHelper{
-				{OnCallMethodName: "Run", OnCallMethodArgType: []string{}, RetArgList: []interface{}{fmt.Errorf("executable file not found in $PATH")}},
+				{OnCallMethodName: "run", OnCallMethodArgType: []string{}, RetArgList: []interface{}{fmt.Errorf("executable file not found in $PATH")}},
 				{OnCallMethodName: "SetStdout", OnCallMethodArgType: []string{"*bytes.Buffer"}, RetArgList: nil},
 				{OnCallMethodName: "SetStderr", OnCallMethodArgType: []string{"*bytes.Buffer"}, RetArgList: nil},
 			},
@@ -829,7 +829,7 @@ func TestRun(t *testing.T) {
 			cmdArg:         "addr",
 			onRetArgsIface: &ovntest.TestifyMockHelper{OnCallMethodName: "Command", OnCallMethodArgType: []string{"string", "string"}, RetArgList: []interface{}{mockCmd}},
 			onRetArgsCmdList: []ovntest.TestifyMockHelper{
-				{OnCallMethodName: "Run", OnCallMethodArgType: []string{}, RetArgList: []interface{}{fmt.Errorf("executable file not found in $PATH")}},
+				{OnCallMethodName: "run", OnCallMethodArgType: []string{}, RetArgList: []interface{}{fmt.Errorf("executable file not found in $PATH")}},
 				{OnCallMethodName: "SetStdout", OnCallMethodArgType: []string{"*bytes.Buffer"}, RetArgList: nil},
 				{OnCallMethodName: "SetStderr", OnCallMethodArgType: []string{"*bytes.Buffer"}, RetArgList: nil},
 			},
@@ -841,7 +841,7 @@ func TestRun(t *testing.T) {
 			cmdArg:         "a",
 			onRetArgsIface: &ovntest.TestifyMockHelper{OnCallMethodName: "Command", OnCallMethodArgType: []string{"string", "string"}, RetArgList: []interface{}{mockCmd}},
 			onRetArgsCmdList: []ovntest.TestifyMockHelper{
-				{OnCallMethodName: "Run", OnCallMethodArgType: []string{}, RetArgList: []interface{}{nil}},
+				{OnCallMethodName: "run", OnCallMethodArgType: []string{}, RetArgList: []interface{}{nil}},
 				{OnCallMethodName: "SetStdout", OnCallMethodArgType: []string{"*bytes.Buffer"}, RetArgList: nil},
 				{OnCallMethodName: "SetStderr", OnCallMethodArgType: []string{"*bytes.Buffer"}, RetArgList: nil},
 			},
@@ -906,7 +906,7 @@ func TestRunWithEnvVars(t *testing.T) {
 			envArgs:        []string{},
 			onRetArgsIface: &ovntest.TestifyMockHelper{OnCallMethodName: "Command", OnCallMethodArgType: []string{"string", "string"}, RetArgList: []interface{}{mockCmd}},
 			onRetArgsCmdList: []ovntest.TestifyMockHelper{
-				{OnCallMethodName: "Run", OnCallMethodArgType: []string{}, RetArgList: []interface{}{nil}},
+				{OnCallMethodName: "run", OnCallMethodArgType: []string{}, RetArgList: []interface{}{nil}},
 				{OnCallMethodName: "SetStdout", OnCallMethodArgType: []string{"*bytes.Buffer"}, RetArgList: nil},
 				{OnCallMethodName: "SetStderr", OnCallMethodArgType: []string{"*bytes.Buffer"}, RetArgList: nil},
 			},
@@ -919,7 +919,7 @@ func TestRunWithEnvVars(t *testing.T) {
 			envArgs:        []string{"OVN_NB_DAEMON=/some/blah/path"},
 			onRetArgsIface: &ovntest.TestifyMockHelper{OnCallMethodName: "Command", OnCallMethodArgType: []string{"string", "string"}, RetArgList: []interface{}{mockCmd}},
 			onRetArgsCmdList: []ovntest.TestifyMockHelper{
-				{OnCallMethodName: "Run", OnCallMethodArgType: []string{}, RetArgList: []interface{}{nil}},
+				{OnCallMethodName: "run", OnCallMethodArgType: []string{}, RetArgList: []interface{}{nil}},
 				{OnCallMethodName: "SetStdout", OnCallMethodArgType: []string{"*bytes.Buffer"}, RetArgList: nil},
 				{OnCallMethodName: "SetStderr", OnCallMethodArgType: []string{"*bytes.Buffer"}, RetArgList: nil},
 				{OnCallMethodName: "SetEnv", OnCallMethodArgType: []string{"[]string"}, RetArgList: nil},
@@ -933,7 +933,7 @@ func TestRunWithEnvVars(t *testing.T) {
 			envArgs:        nil,
 			onRetArgsIface: &ovntest.TestifyMockHelper{OnCallMethodName: "Command", OnCallMethodArgType: []string{"string", "string"}, RetArgList: []interface{}{mockCmd}},
 			onRetArgsCmdList: []ovntest.TestifyMockHelper{
-				{OnCallMethodName: "Run", OnCallMethodArgType: []string{}, RetArgList: []interface{}{fmt.Errorf("executable file not found in $PATH")}},
+				{OnCallMethodName: "run", OnCallMethodArgType: []string{}, RetArgList: []interface{}{fmt.Errorf("executable file not found in $PATH")}},
 				{OnCallMethodName: "SetStdout", OnCallMethodArgType: []string{"*bytes.Buffer"}, RetArgList: nil},
 				{OnCallMethodName: "SetStderr", OnCallMethodArgType: []string{"*bytes.Buffer"}, RetArgList: nil},
 			},

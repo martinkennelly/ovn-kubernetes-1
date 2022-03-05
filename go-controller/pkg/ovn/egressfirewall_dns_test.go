@@ -173,7 +173,7 @@ func TestAdd(t *testing.T) {
 			},
 		},
 		{
-			desc:                     "EgressFirewall DNS Run Runs update after the ttl returned from the DNS server expires",
+			desc:                     "EgressFirewall DNS run Runs update after the ttl returned from the DNS server expires",
 			errExp:                   false,
 			dnsName:                  test1DNSName,
 			testingUpdateOnQueryTime: true,

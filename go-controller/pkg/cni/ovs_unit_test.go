@@ -330,7 +330,7 @@ func TestOfctlExec(t *testing.T) {
 			onRetArgsCmdList: []ovntest.TestifyMockHelper{
 				{OnCallMethodName: "SetStdout", OnCallMethodArgType: []string{"*bytes.Buffer"}, RetArgList: []interface{}{nil}},
 				{OnCallMethodName: "SetStderr", OnCallMethodArgType: []string{"*bytes.Buffer"}, RetArgList: []interface{}{nil}},
-				{OnCallMethodName: "Run", OnCallMethodArgType: []string{}, RetArgList: []interface{}{nil}},
+				{OnCallMethodName: "run", OnCallMethodArgType: []string{}, RetArgList: []interface{}{nil}},
 			},
 			runnerInstance: mockKexecIface,
 		},
@@ -341,7 +341,7 @@ func TestOfctlExec(t *testing.T) {
 			onRetArgsCmdList: []ovntest.TestifyMockHelper{
 				{OnCallMethodName: "SetStdout", OnCallMethodArgType: []string{"*bytes.Buffer"}, RetArgList: []interface{}{nil}},
 				{OnCallMethodName: "SetStderr", OnCallMethodArgType: []string{"*bytes.Buffer"}, RetArgList: []interface{}{nil}},
-				{OnCallMethodName: "Run", OnCallMethodArgType: []string{}, RetArgList: []interface{}{fmt.Errorf("failed to run 'ovs-ofctl'")}},
+				{OnCallMethodName: "run", OnCallMethodArgType: []string{}, RetArgList: []interface{}{fmt.Errorf("failed to run 'ovs-ofctl'")}},
 			},
 			runnerInstance: mockKexecIface,
 		},

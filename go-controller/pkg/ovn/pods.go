@@ -534,12 +534,23 @@ func (oc *Controller) addLogicalPort(pod *kapi.Pod) (err error) {
 		allOps = append(allOps, ops...)
 	}
 
+	if oc.metricsRecorder.OcWatch.IsEnabled() {
+		op, err := oc.metricsRecorder.OcWatch.GetOperation()
+		if err != nil {
+			klog.Infof("Unable to get OVN controller NB_Global nb_cfg operation. Ignoring..")
+		} else {
+			allOps = append(allOps, op)
+		}
+	}
+
 	results, err := libovsdbops.TransactAndCheck(oc.nbClient, allOps)
 	if err != nil {
 
 		return fmt.Errorf("could not perform creation or update of logical switch port %s - %+v", portName, err)
 	}
-	go oc.metricsRecorder.AddLSPEvent(pod.UID)
+	if oc.metricsRecorder.PodWatch.IsEnabled() {
+		go oc.metricsRecorder.PodWatch.AddLSPEvent(pod.UID)
+	}
 
 	// Add the pod's logical switch port to the port cache
 	var lspUUID string

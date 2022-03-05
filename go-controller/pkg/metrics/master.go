@@ -2,6 +2,7 @@ package metrics
 
 import (
 	"fmt"
+	"github.com/ovn-org/libovsdb/ovsdb"
 	"runtime"
 	"sync"
 	"time"
@@ -281,24 +282,6 @@ func RegisterMasterMetrics(sbClient libovsdbclient.Client) {
 				Name:      "sb_e2e_timestamp",
 				Help:      "The current e2e-timestamp value as observed in the southbound database",
 			}, scrapeOvnTimestamp))
-		scrapeNbcfgSbdb := func() float64 {
-			row, err := libovsdbops.FindSBGlobal(sbClient)
-			if err != nil {
-				klog.Errorf("Failed to get SB_Global: %v", err)
-				return 0
-			}
-			return float64(row.NbCfg)
-		}
-		prometheus.MustRegister(prometheus.NewGaugeFunc(
-			prometheus.GaugeOpts{
-				Namespace: MetricOvnkubeNamespace,
-				Subsystem: MetricOvnkubeSubsystemMaster,
-				Name:      "nb_cfg_sbdb",
-				Help:      "The value of nb_cfg in OVN Southbound database SB_Global table",
-			},
-			scrapeNbcfgSbdb,
-		))
-		prometheus.MustRegister(&chassisPrivateScraper{sbClient: sbClient})
 		prometheus.MustRegister(prometheus.NewCounterFunc(
 			prometheus.CounterOpts{
 				Namespace: MetricOvnkubeNamespace,
@@ -345,7 +328,6 @@ func RegisterMasterMetrics(sbClient libovsdbclient.Client) {
 		prometheus.MustRegister(metricEgressFirewallRuleCount)
 		prometheus.MustRegister(metricIPsecEnabled)
 		prometheus.MustRegister(metricEgressFirewallCount)
-		registerControlPlaneRecorderMetrics()
 		registerWorkqueueMetrics(MetricOvnkubeNamespace, MetricOvnkubeSubsystemMaster)
 	})
 }
@@ -364,7 +346,6 @@ func StartMasterMetricUpdater(stopChan <-chan struct{}, nbClient libovsdbclient.
 				select {
 				case <-ticker.C:
 					updateE2ETimestampMetric(nbClient)
-					incrementNbCfg(nbClient)
 				case <-stopChan:
 					return
 				}
@@ -463,13 +444,6 @@ func DecrementEgressFirewallCount() {
 	metricEgressFirewallCount.Dec()
 }
 
-func registerControlPlaneRecorderMetrics() {
-	prometheus.MustRegister(metricFirstSeenLSPLatency)
-	prometheus.MustRegister(metricLSPPortBindingLatency)
-	prometheus.MustRegister(metricPortBindingUpLatency)
-	prometheus.MustRegister(metricPortBindingChassisLatency)
-}
-
 type timestampType int
 
 const (
@@ -489,44 +463,103 @@ type record struct {
 	timestampType
 }
 
-type ControlPlaneRecorder struct {
+type podWatch struct {
 	sync.Mutex
+	sbClient   libovsdbclient.Client
+	enabled    bool
 	podRecords map[kapimtypes.UID]*record
 }
 
-func NewControlPlaneRecorder(sbClient libovsdbclient.Client) *ControlPlaneRecorder {
-	recorder := ControlPlaneRecorder{sync.Mutex{}, make(map[kapimtypes.UID]*record)}
-	sbClient.Cache().AddEventHandler(&cache.EventHandlerFuncs{
+// ocWatch implements the Collector interface so we can
+// generate chassis metrics on-the-fly per scrape
+type ocWatch struct {
+	sync.Mutex
+	nbClient      libovsdbclient.Client
+	sbClient      libovsdbclient.Client
+	maxTickPeriod time.Duration
+	tick          *time.Ticker
+	enabled       bool
+	nbCfg         int
+}
+
+type ControlPlaneRecorder struct {
+	PodWatch podWatch
+	OcWatch  ocWatch
+}
+
+func NewControlPlaneRecorder(nbClient, sbClient libovsdbclient.Client, podWatchEnabled, ocWatchEnabled bool) *ControlPlaneRecorder {
+	recorder := ControlPlaneRecorder{
+		PodWatch: podWatch{
+			sync.Mutex{}, sbClient, podWatchEnabled, make(map[kapimtypes.UID]*record)},
+		OcWatch: ocWatch{
+			sync.Mutex{}, nbClient, sbClient, time.Second * 30,
+			time.NewTicker(time.Second * 30), ocWatchEnabled, 0,
+		},
+	}
+	return &recorder
+}
+
+func (cpr *ControlPlaneRecorder) Run(stop <-chan struct{}) {
+	if cpr.PodWatch.IsEnabled() {
+		cpr.PodWatch.registerMetrics()
+		cpr.PodWatch.run()
+	}
+
+	if cpr.OcWatch.IsEnabled() {
+		cpr.OcWatch.registerMetrics()
+		cpr.OcWatch.run(stop)
+	}
+}
+
+func (pw *podWatch) registerMetrics() {
+	prometheus.MustRegister(metricFirstSeenLSPLatency)
+	prometheus.MustRegister(metricLSPPortBindingLatency)
+	prometheus.MustRegister(metricPortBindingUpLatency)
+	prometheus.MustRegister(metricPortBindingChassisLatency)
+}
+
+func (pw *podWatch) run() {
+	//TODO: validate port binding table is there.
+	pw.sbClient.Cache().AddEventHandler(&cache.EventHandlerFuncs{
 		AddFunc: func(table string, model model.Model) {
-			go recorder.AddPortBindingEvent(table, model)
+			if table != portBindingTable {
+				return
+			}
+			go pw.addPortBindingEvent(model)
 		},
 		UpdateFunc: func(table string, old model.Model, new model.Model) {
-			go recorder.UpdatePortBindingEvent(table, old, new)
+			if table != portBindingTable {
+				return
+			}
+			go pw.updatePortBindingEvent(old, new)
 		},
 		DeleteFunc: func(table string, model model.Model) {
 		},
 	})
-	return &recorder
 }
 
-func (ps *ControlPlaneRecorder) AddPodEvent(podUID kapimtypes.UID) {
-	ps.Lock()
-	ps.podRecords[podUID] = &record{timestamp: time.Now(), timestampType: firstSeen}
-	ps.Unlock()
+func (pw *podWatch) IsEnabled() bool {
+	return pw.enabled
 }
 
-func (ps *ControlPlaneRecorder) CleanPodRecord(podUID kapimtypes.UID) {
-	ps.Lock()
-	delete(ps.podRecords, podUID)
-	ps.Unlock()
+func (pw *podWatch) AddPodEvent(podUID kapimtypes.UID) {
+	pw.Lock()
+	pw.podRecords[podUID] = &record{timestamp: time.Now(), timestampType: firstSeen}
+	pw.Unlock()
 }
 
-func (ps *ControlPlaneRecorder) AddLSPEvent(podUID kapimtypes.UID) {
+func (pw *podWatch) CleanPodRecord(podUID kapimtypes.UID) {
+	pw.Lock()
+	delete(pw.podRecords, podUID)
+	pw.Unlock()
+}
+
+func (pw *podWatch) AddLSPEvent(podUID kapimtypes.UID) {
 	now := time.Now()
-	ps.Lock()
-	defer ps.Unlock()
+	pw.Lock()
+	defer pw.Unlock()
 	var r *record
-	if r = ps.getRecord(podUID); r == nil {
+	if r = pw.getRecord(podUID); r == nil {
 		klog.Errorf("Metrics: add Logical Switch Port event expected pod with UID %q in cache", podUID)
 		return
 	}
@@ -539,10 +572,7 @@ func (ps *ControlPlaneRecorder) AddLSPEvent(podUID kapimtypes.UID) {
 	r.timestampType = logicalSwitchPort
 }
 
-func (ps *ControlPlaneRecorder) AddPortBindingEvent(table string, m model.Model) {
-	if table != portBindingTable {
-		return
-	}
+func (pw *podWatch) addPortBindingEvent(m model.Model) {
 	var r *record
 	now := time.Now()
 	row := m.(*sbdb.PortBinding)
@@ -550,9 +580,9 @@ func (ps *ControlPlaneRecorder) AddPortBindingEvent(table string, m model.Model)
 	if podUID == "" {
 		return
 	}
-	ps.Lock()
-	defer ps.Unlock()
-	if r = ps.getRecord(podUID); r == nil {
+	pw.Lock()
+	defer pw.Unlock()
+	if r = pw.getRecord(podUID); r == nil {
 		klog.Errorf("Metrics: add port binding event expected pod with UID %q in cache", podUID)
 		return
 	}
@@ -565,10 +595,7 @@ func (ps *ControlPlaneRecorder) AddPortBindingEvent(table string, m model.Model)
 	r.timestampType = portBinding
 }
 
-func (ps *ControlPlaneRecorder) UpdatePortBindingEvent(table string, old, new model.Model) {
-	if table != portBindingTable {
-		return
-	}
+func (pw *podWatch) updatePortBindingEvent(old, new model.Model) {
 	var r *record
 	oldRow := old.(*sbdb.PortBinding)
 	newRow := new.(*sbdb.PortBinding)
@@ -577,9 +604,9 @@ func (ps *ControlPlaneRecorder) UpdatePortBindingEvent(table string, old, new mo
 	if podUID == "" {
 		return
 	}
-	ps.Lock()
-	defer ps.Unlock()
-	if r = ps.getRecord(podUID); r == nil {
+	pw.Lock()
+	defer pw.Unlock()
+	if r = pw.getRecord(podUID); r == nil {
 		klog.Errorf("Metrics: port binding update expected pod with UID %q in cache", podUID)
 		return
 	}
@@ -594,8 +621,8 @@ func (ps *ControlPlaneRecorder) UpdatePortBindingEvent(table string, old, new mo
 }
 
 // getRecord assumes lock is held by caller and returns record from map with func argument as the key
-func (ps *ControlPlaneRecorder) getRecord(podUID kapimtypes.UID) *record {
-	r, ok := ps.podRecords[podUID]
+func (pw *podWatch) getRecord(podUID kapimtypes.UID) *record {
+	r, ok := pw.podRecords[podUID]
 	if !ok {
 		klog.Errorf("Metrics: cache entry expected pod with UID %q but failed to find it", podUID)
 		return nil
@@ -603,33 +630,76 @@ func (ps *ControlPlaneRecorder) getRecord(podUID kapimtypes.UID) *record {
 	return r
 }
 
-func getPodUIDFromPortBinding(row *sbdb.PortBinding) kapimtypes.UID {
-	if isPod, ok := row.ExternalIDs["pod"]; !ok || isPod != "true" {
-		return ""
-	}
-	podUID, ok := row.Options["iface-id-ver"]
-	if !ok {
-		return ""
-	}
-	return kapimtypes.UID(podUID)
+func (c *ocWatch) run(stopChan <-chan struct{}) {
+	// add go until stop chan
+	go func() {
+		c.tick = time.NewTicker(c.maxTickPeriod)
+		defer c.tick.Stop()
+		for {
+			select {
+			case <-c.tick.C:
+				if err := libovsdbops.UpdateNBGlobalNbCfg(c.nbClient, c.getNextNbCfgValue()); err != nil {
+					klog.Errorf("Failed to update NB Global nb_cfg field: %v", err)
+				}
+			case <-stopChan:
+				return
+			}
+		}
+	}()
 }
 
-func incrementNbCfg(nbClient libovsdbclient.Client) {
-	nbCfgValue += 1
-	if err := libovsdbops.UpdateNBGlobalNbCfg(nbClient, nbCfgValue); err != nil {
-		klog.Errorf("Failed to increment NB_Global nb_cfg value: %v", err)
-		return
+func (c *ocWatch) IsEnabled() bool {
+	return c.enabled
+}
+
+func (c *ocWatch) registerMetrics() {
+	prometheus.MustRegister(prometheus.NewGaugeFunc(
+		prometheus.GaugeOpts{
+			Namespace: MetricOvnkubeNamespace,
+			Subsystem: MetricOvnkubeSubsystemMaster,
+			Name:      "nb_cfg_sbdb",
+			Help:      "The value of nb_cfg in OVN Southbound database SB_Global table",
+		},
+		func() float64 {
+			row, err := libovsdbops.FindSBGlobal(c.sbClient)
+			if err != nil {
+				klog.Errorf("Failed to get SB_Global: %v", err)
+				return 0
+			}
+			return float64(row.NbCfg)
+		},
+	))
+	prometheus.MustRegister(c)
+}
+
+func (c *ocWatch) GetOperation() (ovsdb.Operation, error) {
+	nbGlobal, err := libovsdbops.FindNBGlobal(c.nbClient)
+	if err != nil {
+		return ovsdb.Operation{}, fmt.Errorf("failed to get OVN Northbound Global table entry")
 	}
-	metricNbcfgNbdb.Set(float64(nbCfgValue))
+
+	nbGlobal.NbCfg = c.getNextNbCfgValue()
+	opModel := libovsdbops.OperationModel{
+		Model: nbGlobal,
+		OnModelUpdates: []interface{}{
+			&nbGlobal.NbCfg,
+		},
+		ErrNotFound: true,
+	}
+	ops, err := c.nbClient.Create(opModel)
+	if err != nil {
+		return ovsdb.Operation{}, fmt.Errorf("failed to create operation: %v", err)
+	}
+	if len(ops) != 1 {
+		return ovsdb.Operation{}, fmt.Errorf("unexpected operations length of %d", len(ops))
+	}
+
+	c.tick.Reset(c.maxTickPeriod)
+
+	return ops[0], nil
 }
 
-// chassisPrivateScraper implements the Collector interface so we can
-// generate chassis metrics on-the-fly per scrape
-type chassisPrivateScraper struct {
-	sbClient libovsdbclient.Client
-}
-
-func (c *chassisPrivateScraper) Describe(ch chan<- *prometheus.Desc) {
+func (c *ocWatch) Describe(ch chan<- *prometheus.Desc) {
 	var metricSeen bool
 	metricsCh := make(chan prometheus.Metric)
 	go func() {
@@ -642,18 +712,18 @@ func (c *chassisPrivateScraper) Describe(ch chan<- *prometheus.Desc) {
 	}
 	if !metricSeen {
 		descFailErr := fmt.Errorf("failed to describe metric %q", metricNbcfgChassis.String())
-		klog.Errorln(descFailErr.Error())
+		klog.Errorf("%v", descFailErr)
 		ch <- prometheus.NewInvalidDesc(descFailErr)
 	}
 }
 
 // Collect scrapes the Chassis and Chassis_Private tables to determine the
-func (c *chassisPrivateScraper) Collect(ch chan<- prometheus.Metric) {
+func (c *ocWatch) Collect(ch chan<- prometheus.Metric) {
 	// the nb_cfg value is in Chassis_Private, but the
 	// hostname is in Chassis. So we need to list both and join
 	allChassis, err := libovsdbops.ListChassis(c.sbClient)
 	if err != nil {
-		errMsg := fmt.Sprintf("Failed to list SBDB Chassis table: %v", err)
+		errMsg := fmt.Sprintf("Failed to list SB DB Chassis table: %v", err)
 		klog.Error(errMsg)
 		ch <- prometheus.NewInvalidMetric(metricNbcfgChassis, fmt.Errorf("%s", errMsg))
 		return
@@ -667,7 +737,7 @@ func (c *chassisPrivateScraper) Collect(ch chan<- prometheus.Metric) {
 
 	allChassisPrivate, err := libovsdbops.FindChassisPrivate(c.sbClient)
 	if err != nil {
-		errMsg := fmt.Sprintf("Failed to list SBDB Chassis_Private table: %v", err)
+		errMsg := fmt.Sprintf("Failed to list SB DB Chassis_Private table: %v", err)
 		klog.Error(errMsg)
 		ch <- prometheus.NewInvalidMetric(metricNbcfgChassis, fmt.Errorf("%s", errMsg))
 		return
@@ -684,4 +754,22 @@ func (c *chassisPrivateScraper) Collect(ch chan<- prometheus.Metric) {
 			hostname,
 		)
 	}
+}
+
+func (c *ocWatch) getNextNbCfgValue() int {
+	c.Lock()
+	c.nbCfg = c.nbCfg + 1
+	c.Unlock()
+	return c.nbCfg
+}
+
+func getPodUIDFromPortBinding(row *sbdb.PortBinding) kapimtypes.UID {
+	if isPod, ok := row.ExternalIDs["pod"]; !ok || isPod != "true" {
+		return ""
+	}
+	podUID, ok := row.Options["iface-id-ver"]
+	if !ok {
+		return ""
+	}
+	return kapimtypes.UID(podUID)
 }

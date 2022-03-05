@@ -695,12 +695,12 @@ var CommonFlags = []cli.Flag{
 	},
 	&cli.BoolFlag{
 		Name:        "nbctl-daemon-mode",
-		Usage:       "Run ovn-nbctl in daemon mode to improve performance in large clusters",
+		Usage:       "run ovn-nbctl in daemon mode to improve performance in large clusters",
 		Destination: &NbctlDaemonMode,
 	},
 	&cli.BoolFlag{
 		Name:        "unprivileged-mode",
-		Usage:       "Run ovnkube-node container in unprivileged mode. Valid only with --init-node option.",
+		Usage:       "run ovnkube-node container in unprivileged mode. Valid only with --init-node option.",
 		Destination: &UnprivilegedMode,
 	},
 	&cli.BoolFlag{

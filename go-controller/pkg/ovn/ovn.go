@@ -288,7 +288,7 @@ func NewOvnController(ovnClient *util.OVNClientset, wf *factory.WatchFactory, st
 		svcController:            svcController,
 		svcFactory:               svcFactory,
 		modelClient:              modelClient,
-		metricsRecorder:          metrics.NewControlPlaneRecorder(libovsdbOvnSBClient),
+		metricsRecorder:          metrics.NewControlPlaneRecorder(libovsdbOvnNBClient, libovsdbOvnSBClient, true, true),
 	}
 }
 
@@ -675,7 +675,9 @@ func (oc *Controller) WatchPods() {
 	oc.watchFactory.AddPodHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj interface{}) {
 			pod := obj.(*kapi.Pod)
-			go oc.metricsRecorder.AddPodEvent(pod.UID)
+			if oc.metricsRecorder.PodWatch.IsEnabled() {
+				go oc.metricsRecorder.PodWatch.AddPodEvent(pod.UID)
+			}
 			oc.initRetryPod(pod)
 			if !oc.ensurePod(nil, pod, true) {
 				oc.unSkipRetryPod(pod)
@@ -710,7 +712,9 @@ func (oc *Controller) WatchPods() {
 		},
 		DeleteFunc: func(obj interface{}) {
 			pod := obj.(*kapi.Pod)
-			go oc.metricsRecorder.CleanPodRecord(pod.UID)
+			if oc.metricsRecorder.PodWatch.IsEnabled() {
+				go oc.metricsRecorder.PodWatch.CleanPodRecord(pod.UID)
+			}
 			oc.checkAndDeleteRetryPod(pod.UID)
 			if !util.PodWantsNetwork(pod) {
 				oc.deletePodExternalGW(pod)

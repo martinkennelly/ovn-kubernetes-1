@@ -405,7 +405,7 @@ func RunOVNAppctlWithTimeout(timeout int, args ...string) (string, string, error
 	return strings.Trim(strings.TrimSpace(stdout.String()), "\""), stderr.String(), err
 }
 
-// Run the ovn-ctl command and retry if "Connection refused"
+// run the ovn-ctl command and retry if "Connection refused"
 // poll waitng for service to become available
 // FIXME: Remove when https://github.com/ovn-org/libovsdb/issues/235 is fixed
 func runOVNretry(cmdPath string, envVars []string, args ...string) (*bytes.Buffer, *bytes.Buffer, error) {

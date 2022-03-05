@@ -396,7 +396,7 @@ var _ = ginkgo.Describe("Master Operations", func() {
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 			err = util.SetNodeManagementPortMACAddress(nodeAnnotator, ovntest.MustParseMAC(mgmtMAC))
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
-			err = nodeAnnotator.Run()
+			err = nodeAnnotator.run()
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 			f, err = factory.NewMasterWatchFactory(fakeClient)
@@ -422,7 +422,7 @@ var _ = ginkgo.Describe("Master Operations", func() {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				clusterController.hoMaster.Run(stopChan)
+				clusterController.hoMaster.run(stopChan)
 			}()
 
 			gomega.Eventually(fexec.CalledMatchesExpected, 2).Should(gomega.BeTrue(), fexec.ErrorDesc)
@@ -441,7 +441,7 @@ var _ = ginkgo.Describe("Master Operations", func() {
 			return nil
 		}
 
-		err := app.Run([]string{
+		err := app.run([]string{
 			app.Name,
 			"-cluster-subnets=" + clusterCIDR,
 			"-enable-multicast",
@@ -502,7 +502,7 @@ var _ = ginkgo.Describe("Master Operations", func() {
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 			err = util.SetNodeManagementPortMACAddress(nodeAnnotator, ovntest.MustParseMAC(mgmtMAC))
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
-			err = nodeAnnotator.Run()
+			err = nodeAnnotator.run()
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 			f, err = factory.NewMasterWatchFactory(fakeClient)
@@ -527,7 +527,7 @@ var _ = ginkgo.Describe("Master Operations", func() {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				clusterController.hoMaster.Run(stopChan)
+				clusterController.hoMaster.run(stopChan)
 			}()
 
 			gomega.Eventually(fexec.CalledMatchesExpected, 2).Should(gomega.BeTrue(), fexec.ErrorDesc)
@@ -546,7 +546,7 @@ var _ = ginkgo.Describe("Master Operations", func() {
 			return nil
 		}
 
-		err := app.Run([]string{
+		err := app.run([]string{
 			app.Name,
 			"-cluster-subnets=" + clusterCIDR,
 			"-enable-multicast",
@@ -607,7 +607,7 @@ var _ = ginkgo.Describe("Master Operations", func() {
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 			err = util.SetNodeHostSubnetAnnotation(nodeAnnotator, ovntest.MustParseIPNets(nodeSubnet))
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
-			err = nodeAnnotator.Run()
+			err = nodeAnnotator.run()
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 			f, err = factory.NewMasterWatchFactory(fakeClient)
@@ -630,7 +630,7 @@ var _ = ginkgo.Describe("Master Operations", func() {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				clusterController.hoMaster.Run(stopChan)
+				clusterController.hoMaster.run(stopChan)
 			}()
 
 			gomega.Eventually(fexec.CalledMatchesExpected, 2).Should(gomega.BeTrue(), fexec.ErrorDesc)
@@ -649,7 +649,7 @@ var _ = ginkgo.Describe("Master Operations", func() {
 			return nil
 		}
 
-		err := app.Run([]string{
+		err := app.run([]string{
 			app.Name,
 			"-cluster-subnets=" + clusterCIDR,
 			"-enable-multicast",
@@ -768,7 +768,7 @@ subnet=%s
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 			err = util.SetNodeHostSubnetAnnotation(nodeAnnotator, ovntest.MustParseIPNets(masterSubnet))
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
-			err = nodeAnnotator.Run()
+			err = nodeAnnotator.run()
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 			f, err = factory.NewMasterWatchFactory(fakeClient)
@@ -800,7 +800,7 @@ subnet=%s
 			return nil
 		}
 
-		err := app.Run([]string{app.Name})
+		err := app.run([]string{app.Name})
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	})
 })

@@ -106,9 +106,9 @@ func (e *EgressDNS) Delete(namespace string) bool {
 	e.lock.Unlock()
 	for _, name := range dnsNamesToDelete {
 		e.dns.Delete(name)
-		// send a message to the "deleted" buffered channel so that Run() stops using
+		// send a message to the "deleted" buffered channel so that run() stops using
 		// the deleted domain name. (channel is buffered so that sending values to it
-		// blocks only if Run() is busy updating its internal values)
+		// blocks only if run() is busy updating its internal values)
 		e.deleted <- name
 	}
 	return len(e.dnsEntries) == 0

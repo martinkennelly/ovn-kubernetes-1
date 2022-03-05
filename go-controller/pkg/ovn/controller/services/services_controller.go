@@ -171,7 +171,7 @@ func (c *Controller) Run(workers int, stopCh <-chan struct{}, runRepair, useLBGr
 	}
 
 	if runRepair {
-		// Run the repair controller only once
+		// run the repair controller only once
 		// it keeps in sync Kubernetes and OVN
 		// and handles removal of stale data on upgrades
 		c.repair.runBeforeSync()

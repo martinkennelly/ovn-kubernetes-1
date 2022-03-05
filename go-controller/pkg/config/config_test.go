@@ -1391,7 +1391,7 @@ foo=bar
 		}
 	}
 
-	// Run once without config file, once with
+	// run once without config file, once with
 	Describe("Kubernetes config options", func() {
 		Context("returns an error when the", func() {
 			generateTestsSimple("CA cert does not exist",

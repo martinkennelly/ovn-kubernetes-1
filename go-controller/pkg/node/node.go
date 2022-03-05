@@ -443,7 +443,7 @@ func (n *OvnNode) Start(wg *sync.WaitGroup) error {
 	// is not needed. Future upgrade flows will need to take DPUs into account.
 	if config.OvnKubeNode.Mode == types.NodeModeFull {
 		// Upgrade for Node. If we upgrade workers before masters, then we need to keep service routing via
-		// mgmt port until masters have been updated and modified OVN config. Run a goroutine to handle this case
+		// mgmt port until masters have been updated and modified OVN config. run a goroutine to handle this case
 
 		// note this will change in the future to control-plane:
 		// https://github.com/kubernetes/kubernetes/pull/95382
