@@ -485,6 +485,8 @@ func (oc *Controller) addLogicalPort(pod *kapi.Pod) (err error) {
 		annoStart := time.Now()
 		err = oc.kube.SetAnnotationsOnPod(pod.Namespace, pod.Name, marshalledAnnotation)
 		podAnnoTime = time.Since(annoStart)
+		// observe the pod creation latency metric.
+		metrics.RecordPodCreated(pod)
 		if err != nil {
 			return fmt.Errorf("failed to set annotation on pod %s: %v", pod.Name, err)
 		}
@@ -621,8 +623,6 @@ func (oc *Controller) addLogicalPort(pod *kapi.Pod) (err error) {
 			return err
 		}
 	}
-	// observe the pod creation latency metric.
-	metrics.RecordPodCreated(pod)
 	return nil
 }
 
