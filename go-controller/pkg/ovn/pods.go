@@ -134,7 +134,7 @@ func (oc *Controller) syncPodsRetriable(pods []interface{}) error {
 	return nil
 }
 
-func (oc *Controller) deleteLogicalPort(pod *kapi.Pod, portInfo *lpInfo) (err error) {
+func (oc *Controller) deleteLogicalPort(pod *kapi.Pod, portInfo *lpInfo, startTime time.Time) (err error) {
 	podDesc := pod.Namespace + "/" + pod.Name
 	klog.Infof("Deleting pod: %s", podDesc)
 
@@ -176,10 +176,16 @@ func (oc *Controller) deleteLogicalPort(pod *kapi.Pod, portInfo *lpInfo) (err er
 	}
 	allOps = append(allOps, ops...)
 
+	ops, txOkCallBack, err := metrics.GetControlPlaneRecorder().RecordConfigDuration(oc.nbClient, metrics.PodKindName, startTime)
+	if err != nil {
+		klog.Errorf("Failed to record config duration: %v", err)
+	}
+	allOps = append(allOps, ops...)
 	_, err = libovsdbops.TransactAndCheck(oc.nbClient, allOps)
 	if err != nil {
 		return fmt.Errorf("cannot delete logical switch port %s, %v", logicalPort, err)
 	}
+	txOkCallBack()
 
 	klog.Infof("Attempting to release IPs for pod: %s/%s, ips: %s", pod.Namespace, pod.Name,
 		util.JoinIPNetIPs(podIfAddrs, " "))
@@ -308,7 +314,7 @@ func (oc *Controller) addRoutesGatewayIP(pod *kapi.Pod, podAnnotation *util.PodA
 	return nil
 }
 
-func (oc *Controller) addLogicalPort(pod *kapi.Pod) (err error) {
+func (oc *Controller) addLogicalPort(pod *kapi.Pod, startTime time.Time) (err error) {
 	// If a node does node have an assigned hostsubnet don't wait for the logical switch to appear
 	if oc.lsManager.IsNonHostSubnetSwitch(pod.Spec.NodeName) {
 		return nil
@@ -593,12 +599,20 @@ func (oc *Controller) addLogicalPort(pod *kapi.Pod) (err error) {
 	}
 
 	transactStart := time.Now()
+
+	ops, txOkCallBack, err := metrics.GetControlPlaneRecorder().RecordConfigDuration(oc.nbClient, metrics.PodKindName,
+		startTime)
+	if err != nil {
+		klog.Errorf("Failed to record config duration: %v", err)
+	}
+	allOps = append(allOps, ops...)
+
 	results, err := libovsdbops.TransactAndCheckAndSetUUIDs(oc.nbClient, lsp, allOps)
 	libovsdbExecuteTime = time.Since(transactStart)
 	if err != nil {
-
 		return fmt.Errorf("could not perform creation or update of logical switch port %s - %+v", portName, err)
 	}
+	txOkCallBack()
 	metrics.GetControlPlaneRecorder().AddLSP(pod.UID)
 
 	// if somehow lspUUID is empty, there is a bug here with interpreting OVSDB results
