@@ -270,7 +270,7 @@ func (c *Controller) syncService(key string) error {
 			},
 		}
 
-		if err := ovnlb.EnsureLBs(c.nbClient, util.ExternalIDsForObject(service), nil); err != nil {
+		if err := ovnlb.EnsureLBs(c.nbClient, util.ExternalIDsForObject(service), nil, startTime); err != nil {
 			return fmt.Errorf("failed to delete load balancers for service %s/%s: %w",
 				namespace, name, err)
 		}
@@ -323,7 +323,7 @@ func (c *Controller) syncService(key string) error {
 		//
 		// Note: this may fail if a node was deleted between listing nodes and applying.
 		// If so, this will fail and we will resync.
-		if err := ovnlb.EnsureLBs(c.nbClient, util.ExternalIDsForObject(service), lbs); err != nil {
+		if err := ovnlb.EnsureLBs(c.nbClient, util.ExternalIDsForObject(service), lbs, startTime); err != nil {
 			return fmt.Errorf("failed to ensure service %s load balancers: %w", key, err)
 		}
 
