@@ -503,11 +503,11 @@ var _ = ginkgo.Describe("OVN Pod Operations", func() {
 						Namespace: namespaceT.Name,
 					},
 				}
-				err := fakeOvn.controller.ensurePod(nil, podObj, true) // this fails since pod doesn't exist to set annotations
+				err := fakeOvn.controller.ensurePod(nil, podObj, true, time.Time{}) // this fails since pod doesn't exist to set annotations
 				gomega.Expect(err).To(gomega.HaveOccurred())
 
 				gomega.Expect(len(fakeOvn.controller.retryPods)).To(gomega.Equal(0))
-				fakeOvn.controller.addRetryPods([]v1.Pod{*podObj})
+				fakeOvn.controller.addRetryPods([]v1.Pod{*podObj}, time.Time{})
 				key := getPodNamespacedName(podObj)
 				gomega.Expect(len(fakeOvn.controller.retryPods)).To(gomega.Equal(1))
 				gomega.Expect(fakeOvn.controller.retryPods[key]).ToNot(gomega.BeNil())
