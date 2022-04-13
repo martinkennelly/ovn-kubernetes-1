@@ -3,7 +3,6 @@ package ovn
 import (
 	"context"
 	"fmt"
-	"k8s.io/apimachinery/pkg/fields"
 	"math/rand"
 	"net"
 	"os"
@@ -14,6 +13,7 @@ import (
 	kapi "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/fields"
 	kerrors "k8s.io/apimachinery/pkg/util/errors"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/sets"
@@ -1572,7 +1572,7 @@ func (oc *Controller) addUpdateNodeEvent(node *kapi.Node, nSyncs *nodeSyncs) err
 	if err != nil {
 		klog.Errorf("Unable to list existing pods on node: %s, existing pods on this node may not function")
 	} else {
-		oc.addRetryPods(pods.Items)
+		oc.addRetryPods(pods.Items, time.Time{})
 		oc.requestRetryPods()
 	}
 

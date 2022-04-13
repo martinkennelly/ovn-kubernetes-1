@@ -53,7 +53,7 @@ func (oc *Controller) iterateRetryPods(updateAll bool) {
 			// check if we need to retry delete first
 			if podEntry.needsDel != nil {
 				klog.Infof("%s retry pod teardown", podDesc)
-				if err := oc.removePod(pod, podEntry.needsDel); err != nil {
+				if err := oc.removePod(pod, podEntry.needsDel, podEntry.startTimeStamp); err != nil {
 					klog.Infof("%s teardown retry failed; will try again later", podDesc)
 					podEntry.timeStamp = time.Now()
 					continue // if deletion failed we will not retry add
@@ -67,7 +67,7 @@ func (oc *Controller) iterateRetryPods(updateAll bool) {
 			// check if we need to retry add
 			if podEntry.needsAdd {
 				klog.Infof("%s retry pod setup", podDesc)
-				if err := oc.ensurePod(nil, pod, true); err != nil {
+				if err := oc.ensurePod(nil, pod, true, podEntry.startTimeStamp); err != nil {
 					klog.Infof("%s setup retry failed; will try again later", podDesc)
 					podEntry.timeStamp = time.Now()
 				} else {
@@ -118,7 +118,7 @@ func (oc *Controller) unSkipRetryPod(pod *kapi.Pod) {
 
 // initRetryAddPod tracks a pod that failed to be created to potentially retry later (needsAdd = true)
 // initially it is marked as skipped for retry loop (ignore = true)
-func (oc *Controller) initRetryAddPod(pod *kapi.Pod) {
+func (oc *Controller) initRetryAddPod(pod *kapi.Pod, startTime time.Time) {
 	oc.retryPodsLock.Lock()
 	defer oc.retryPodsLock.Unlock()
 	key := getPodNamespacedName(pod)
@@ -127,13 +127,13 @@ func (oc *Controller) initRetryAddPod(pod *kapi.Pod) {
 		entry.pod = pod
 		entry.needsAdd = true
 	} else {
-		oc.retryPods[key] = &retryEntry{pod, time.Now(), 1, true, true, nil}
+		oc.retryPods[key] = &retryEntry{pod, time.Now(), startTime, 1, true, true, nil}
 	}
 }
 
 // initRetryDelPod tracks a pod that failed to be deleted to potentially retry later (needsDel != nil)
 // initially it is marked as skipped for retry loop (ignore = true)
-func (oc *Controller) initRetryDelPod(pod *kapi.Pod) {
+func (oc *Controller) initRetryDelPod(pod *kapi.Pod, startTime time.Time) {
 	oc.retryPodsLock.Lock()
 	defer oc.retryPodsLock.Unlock()
 	key := getPodNamespacedName(pod)
@@ -155,7 +155,7 @@ func (oc *Controller) initRetryDelPod(pod *kapi.Pod) {
 		entry.timeStamp = time.Now()
 		entry.needsDel = portInfo
 	} else {
-		oc.retryPods[key] = &retryEntry{pod, time.Now(), 1, true, false, portInfo}
+		oc.retryPods[key] = &retryEntry{pod, time.Now(), startTime, 1, true, false, portInfo}
 	}
 }
 
@@ -189,7 +189,7 @@ func (oc *Controller) getPodRetryEntry(pod *kapi.Pod) *retryEntry {
 }
 
 // addRetryPods adds multiple pods to be retried later for their add events
-func (oc *Controller) addRetryPods(pods []kapi.Pod) {
+func (oc *Controller) addRetryPods(pods []kapi.Pod, startTime time.Time) {
 	oc.retryPodsLock.Lock()
 	defer oc.retryPodsLock.Unlock()
 	for _, pod := range pods {
@@ -199,7 +199,7 @@ func (oc *Controller) addRetryPods(pods []kapi.Pod) {
 			entry.timeStamp = time.Now()
 			entry.pod = &pod
 		} else {
-			oc.retryPods[key] = &retryEntry{&pod, time.Now(), 1, false, true, nil}
+			oc.retryPods[key] = &retryEntry{&pod, time.Now(), startTime, 1, false, true, nil}
 		}
 	}
 }
