@@ -246,6 +246,9 @@ type MonitoringConfig struct {
 	SFlowTargets []HostPort
 	// IPFIXTargets holds the parsed IPFIX targets and may be used outside the config module.
 	IPFIXTargets []HostPort
+	// EnableConfigDuration holds the boolean flag to enable OVN-Kubernetes master to monitor OVN-Kubernetes master
+	// configuration duration applied to all nodes
+	EnableConfigDuration bool `gcfg:"enable-config-duration"`
 }
 
 // IPFIXConfig holds IPFIX-related performance configuration options. It requires that the ipfix-targets
@@ -770,6 +773,11 @@ var MonitoringFlags = []cli.Flag{
 		Usage: "A comma separated set of IPFIX collectors to export flow data (eg, \"10.128.0.150:2055,10.0.0.151:2055\")." +
 			"Each entry is given in the form [IP address:port] or [:port]. If only port is provided, it uses the Node IP",
 		Destination: &cliConfig.Monitoring.RawIPFIXTargets,
+	},
+	&cli.BoolFlag{
+		Name:        "enable-config-duration",
+		Usage:       "Enables monitoring OVN-Kubernetes master duration to apply configuration to all nodes",
+		Destination: &cliConfig.Monitoring.EnableConfigDuration,
 	},
 }
 

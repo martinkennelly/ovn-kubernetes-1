@@ -4,16 +4,18 @@ import (
 	"fmt"
 	"runtime"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/ovn-org/libovsdb/cache"
 	libovsdbclient "github.com/ovn-org/libovsdb/client"
 	"github.com/ovn-org/libovsdb/model"
+	"github.com/ovn-org/libovsdb/ovsdb"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/config"
+	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/kube"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/libovsdbops"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/nbdb"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/sbdb"
-
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -244,6 +246,29 @@ var metricPortBindingUpLatency = prometheus.NewHistogram(prometheus.HistogramOpt
 	Name:      "pod_port_binding_chassis_port_binding_up_duration_seconds",
 	Help:      "The duration between a pods port binding chassis update and port binding up observed in cache",
 	Buckets:   prometheus.ExponentialBuckets(.01, 2, 15),
+})
+
+var metricConfigDurationStartCount = prometheus.NewCounter(prometheus.CounterOpts{
+	Namespace: MetricOvnkubeNamespace,
+	Subsystem: MetricOvnkubeSubsystemMaster,
+	Name:      "config_duration_start_total",
+	Help:      "The total number of configuration duration monitors started",
+})
+
+// metricConfigDurationEndCount in conjunction with metricConfigDurationStartCount can be used to detect hung OVN-Controllers
+var metricConfigDurationEndCount = prometheus.NewCounter(prometheus.CounterOpts{
+	Namespace: MetricOvnkubeNamespace,
+	Subsystem: MetricOvnkubeSubsystemMaster,
+	Name:      "config_duration_end_total",
+	Help:      "The total number of configuration duration monitors ended",
+})
+
+var metricConfigDurationOvnLatency = prometheus.NewHistogram(prometheus.HistogramOpts{
+	Namespace: MetricOvnkubeNamespace,
+	Subsystem: MetricOvnkubeSubsystemMaster,
+	Name:      "config_duration_ovn_seconds",
+	Help:      "The duration between a transaction sent to OVN and applied to all nodes",
+	Buckets:   prometheus.ExponentialBuckets(.01, 3, 11),
 })
 
 const (
@@ -477,16 +502,31 @@ const (
 	logicalSwitchPort
 	// port binding seen in OVN-Kubernetes control plane southbound database libovsdb cache
 	portBinding
-	// port binding with updated chassis seen in OVN-Kubernetes  control plane southbound database libovsdb cache
+	// port binding with updated chassis seen in OVN-Kubernetes control plane southbound database libovsdb cache
 	portBindingChassis
-	portBindingTable = "Port_Binding"
-
-	queueCheckPeriod           = time.Millisecond * 500
-	addPortBinding   operation = iota
+	// queue operations
+	addPortBinding operation = iota
 	updatePortBinding
 	addPod
 	cleanPod
 	addLogicalSwitchPort
+	addNBGlobal
+	updateNBGlobal
+	// node limit to prevent SB DB pressure with large node counts
+	nodeLimit        = 100
+	queueCheckPeriod = time.Millisecond * 50
+	// prevent OOM by limiting queue size
+	queueLimit = 10000
+	// period to check cluster size and therefore, if we should resize ticker duration to determine availability
+	nodeCheckPeriod = 1 * time.Hour
+	delayPerNode    = 1 * time.Second
+	stopMsg         = "Stopping config duration monitor due to node count greater than %d " +
+		"to protect southbound database from overload"
+	portBindingTable = "Port_Binding"
+	nbGlobalTable    = "NB_Global"
+	// kind names
+	PodKindName     = "pod"
+	ServiceKindName = "service"
 )
 
 type record struct {
@@ -494,82 +534,207 @@ type record struct {
 	timestampType
 }
 
-// item is the data structure for ControlPlaneRecorders queue
+type podEvent struct {
+	timestamp time.Time
+	old       model.Model
+	new       model.Model
+	uid       kapimtypes.UID
+}
+
+type configEvent struct {
+	kindStartTimestamp int
+	txStartTimestamp   int
+	kind               string
+	cfg                int
+}
+
 type item struct {
-	op     operation
-	t      time.Time
-	old    model.Model
-	new    model.Model
-	podUID kapimtypes.UID
+	op operation
+	p  *podEvent
+	c  *configEvent
 }
 
 type ControlPlaneRecorder struct {
+	// pod monitor
 	podRecords map[kapimtypes.UID]*record
-	queue      workqueue.Interface
+
+	//config duration monitor
+	mu            sync.Mutex
+	enabled       bool
+	available     bool
+	reportKind    map[string]prometheus.Histogram
+	configRecords []*configEvent
+
+	queue workqueue.Interface
 }
+
+var cpr *ControlPlaneRecorder
 
 func NewControlPlaneRecorder() *ControlPlaneRecorder {
-	return &ControlPlaneRecorder{
-		podRecords: make(map[kapimtypes.UID]*record),
-	}
+	cpr = &ControlPlaneRecorder{}
+	return cpr
 }
 
-//Run will manage metrics for monitoring control plane objects and block until stop signal received.
-//Monitors pod setup latency
-func (cpr *ControlPlaneRecorder) Run(sbClient libovsdbclient.Client, stop <-chan struct{}) {
-	// only register the metrics when we want them
+func GetControlPlaneRecorder() *ControlPlaneRecorder {
+	if cpr == nil {
+		klog.Warning("Attempted to retrieve before NewControlPlaneRecorder() is called")
+		cpr = &ControlPlaneRecorder{}
+	}
+	if cpr.queue == nil {
+		klog.Warning("Retrieving control plane recorder but it is not Run()")
+	}
+	return cpr
+}
+
+//Run monitors pod setup latency and optionally, the duration for OVN-Kube master to configure k8 kinds
+func (cpr *ControlPlaneRecorder) Run(sbClient, nbClient libovsdbclient.Client, kube kube.Interface, stop <-chan struct{}) {
+	cpr.queue = workqueue.New()
+
+	go func() {
+		wait.Until(cpr.runWorker, queueCheckPeriod, stop)
+		cpr.queue.ShutDown()
+	}()
+
+	// configure pod monitor
 	prometheus.MustRegister(metricFirstSeenLSPLatency)
 	prometheus.MustRegister(metricLSPPortBindingLatency)
 	prometheus.MustRegister(metricPortBindingUpLatency)
 	prometheus.MustRegister(metricPortBindingChassisLatency)
-	cpr.queue = workqueue.New()
+	cpr.podRecords = make(map[kapimtypes.UID]*record)
 
 	sbClient.Cache().AddEventHandler(&cache.EventHandlerFuncs{
 		AddFunc: func(table string, model model.Model) {
 			if table != portBindingTable {
 				return
 			}
-			cpr.queue.Add(item{op: addPortBinding, old: model, t: time.Now()})
+			if !cpr.queueFull() {
+				cpr.queue.Add(&item{addPortBinding, &podEvent{old: model, timestamp: time.Now()}, nil})
+			}
 		},
 		UpdateFunc: func(table string, old model.Model, new model.Model) {
 			if table != portBindingTable {
 				return
 			}
-			cpr.queue.Add(item{op: updatePortBinding, old: old, new: new, t: time.Now()})
-		},
-		DeleteFunc: func(table string, model model.Model) {
+			if !cpr.queueFull() {
+				cpr.queue.Add(&item{updatePortBinding, &podEvent{old: old, new: new, timestamp: time.Now()}, nil})
+			}
 		},
 	})
 
-	go func() {
-		wait.Until(cpr.runWorker, queueCheckPeriod, stop)
-		cpr.queue.ShutDown()
-	}()
+	// ** configuration duration monitor - intro **
+	// We measure the duration to configure whatever k8 kind (pod, services, etc.) object to all nodes and reports
+	// this as a metric. This will give a rough upper bound of how long it takes OVN-Kubernetes master container (CMS)
+	// and OVN to configure all nodes under its control.
+
+	// When the CMS is about to make a transaction to configure whatever kind, config duration monitor provides a
+	// mechanism to allow the caller to pass the time when the CMS first started processing the kind it wants to measure.
+	// This time is stored for later processing and is used as the start time.
+	// An operation is returned to the caller, which they can bundle with their existing transactions sent to OVN which
+	// will tell OVN to measure how long it takes to configure all nodes with the config in the transaction.
+	// Config duration then waits for OVN to configure all nodes and calculates the time delta.
+	// The measurements are limited and are only allowed during certain time periods to reduce the stress on OVN.
+
+	// ** configuration duration monitor - caveats **
+	// The duration described above does not give you an exact time duration for how long it takes to configure your
+	// k8 kind. When you are recording how long it takes OVN to complete your configuration to all nodes, other
+	// transactions may have occurred which may increases the overall time. You may also get longer processing times if one
+	// or more nodes are unavailable because we are measuring how long the functionality takes to apply to ALL nodes.
+
+	// ** configuration duration monitor - How the duration of the config is measured within OVN **
+	// We increment the nb_cfg integer value in the NB_Global table.
+	// ovn-northd notices the nb_cfg change and copies the nb_cfg value to SB_Global table field nb_cfg along with any
+	// other configuration that is changed in OVN Northbound database.
+	// All ovn-controllers detects nb_cfg value change and generates a 'barrier' on the openflow connection to the
+	// nodes ovs-vswitchd. Once ovn-controllers receive the 'barrier processed' reply from ovs-vswitchd which
+	// indicates that all relevant openflow operations associated with NB_Globals nb_cfg value have been
+	// propagated to the nodes OVS, it copies the SB_Global nb_cfg value to its Chassis_Private table nb_cfg record.
+	// ovn-northd detects changes to the Chassis_Private records and computes the minimum nb_cfg for all Chassis_Private
+	// nb_cfg and stores this in NB_Global hv_cfg field along with a timestamp to field hv_cfg_timestamp which
+	// reflects the time when the slowest chassis catches up with the northbound configuration.
+
+	if !config.Monitoring.EnableConfigDuration {
+		return
+	}
+
+	// Override command line to disable this functionality if cluster node size is large to protect southbound database
+	if count, err := getNodeCount(kube); err != nil && count > nodeLimit {
+		klog.Infof(stopMsg, nodeLimit)
+		return
+	}
+	// create a config duration stop channel because we want to coordinate stopping of this func if stop sig received
+	// or node count grows over a limit
+	cdStop := make(chan struct{})
+	// stop sig or node count can close cdStop
+	cpr.runStopSignal(kube, cdStop, stop)
+	cpr.runAvailableUpdate(kube, cdStop)
+	// create a map with key as the name of the k8 kind you want to measure and value with the histogram to report
+	// the duration to configure the kind to all nodes. Suggestion to name the key like so: {k8 kind}. E.g. pod
+	cpr.reportKind = make(map[string]prometheus.Histogram)
+	// register metrics which will take account of configuration start time and the time it
+	// takes OVN to configure all nodes. Note that the result will only give an upper bound limit of how long it
+	// takes to roll out the configuration to all nodes. To make matters more uncertain, the measurements are currently
+	// sampled.
+	cpr.reportKind[PodKindName] = prometheus.NewHistogram(prometheus.HistogramOpts{
+		Namespace: MetricOvnkubeNamespace,
+		Subsystem: MetricOvnkubeSubsystemMaster,
+		Name:      "pod_handler_all_nodes_seconds",
+		Help:      "Upperbound time to configure a pod from when its seen after pod handler and config is applied to all nodes",
+		Buckets:   prometheus.ExponentialBuckets(.01, 3, 11),
+	})
+	prometheus.MustRegister(cpr.reportKind[PodKindName])
+	cpr.reportKind[ServiceKindName] = prometheus.NewHistogram(prometheus.HistogramOpts{
+		Namespace: MetricOvnkubeNamespace,
+		Subsystem: MetricOvnkubeSubsystemMaster,
+		Name:      "service_queue_all_nodes_duration_seconds",
+		Help:      "Upperbound time to configure a service from when its popped off a work queue and config is applied to all nodes",
+		Buckets:   prometheus.ExponentialBuckets(.01, 3, 11),
+	})
+	prometheus.MustRegister(cpr.reportKind[ServiceKindName])
+
+	prometheus.MustRegister(metricConfigDurationStartCount)
+	prometheus.MustRegister(metricConfigDurationEndCount)
+	prometheus.MustRegister(metricConfigDurationOvnLatency)
+
+	cpr.enabled = true
+
+	nbClient.Cache().AddEventHandler(&cache.EventHandlerFuncs{
+		UpdateFunc: func(table string, old model.Model, new model.Model) {
+			if table != nbGlobalTable {
+				return
+			}
+			// disable adding items to queue if functionality is disabled due to large node count
+			if !cpr.enabled {
+				return
+			}
+
+			oldRow := old.(*nbdb.NBGlobal)
+			newRow := new.(*nbdb.NBGlobal)
+
+			if oldRow.HvCfg != newRow.HvCfg && oldRow.HvCfgTimestamp != newRow.HvCfgTimestamp && newRow.HvCfgTimestamp > 0 {
+				if !cpr.queueFull() {
+					cpr.queue.Add(&item{updateNBGlobal, nil, &configEvent{cfg: newRow.HvCfg,
+						kindStartTimestamp: newRow.HvCfgTimestamp}})
+				}
+			}
+		},
+	})
 }
 
 func (cpr *ControlPlaneRecorder) AddPod(podUID kapimtypes.UID) {
-	if cpr.queue != nil {
-		cpr.queue.Add(item{op: addPod, podUID: podUID, t: time.Now()})
+	if cpr.queue != nil && !cpr.queueFull() {
+		cpr.queue.Add(&item{addPod, &podEvent{uid: podUID, timestamp: time.Now()}, nil})
 	}
-}
-
-func (cpr *ControlPlaneRecorder) addPod(podUID kapimtypes.UID, t time.Time) {
-	cpr.podRecords[podUID] = &record{timestamp: t, timestampType: firstSeen}
 }
 
 func (cpr *ControlPlaneRecorder) CleanPod(podUID kapimtypes.UID) {
-	if cpr.queue != nil {
-		cpr.queue.Add(item{op: cleanPod, podUID: podUID})
+	if cpr.queue != nil && !cpr.queueFull() {
+		cpr.queue.Add(&item{cleanPod, &podEvent{uid: podUID}, nil})
 	}
 }
 
-func (cpr *ControlPlaneRecorder) cleanPod(podUID kapimtypes.UID) {
-	delete(cpr.podRecords, podUID)
-}
-
 func (cpr *ControlPlaneRecorder) AddLSP(podUID kapimtypes.UID) {
-	if cpr.queue != nil {
-		cpr.queue.Add(item{op: addLogicalSwitchPort, podUID: podUID, t: time.Now()})
+	if cpr.queue != nil && !cpr.queueFull() {
+		cpr.queue.Add(&item{addLogicalSwitchPort, &podEvent{uid: podUID, timestamp: time.Now()}, nil})
 	}
 }
 
@@ -630,37 +795,7 @@ func (cpr *ControlPlaneRecorder) updatePortBinding(old, new model.Model, t time.
 	}
 }
 
-func (cpr *ControlPlaneRecorder) runWorker() {
-	for cpr.processNextItem() {
-	}
-}
-
-func (cpr *ControlPlaneRecorder) processNextItem() bool {
-	i, term := cpr.queue.Get()
-	if term {
-		return false
-	}
-	cpr.processItem(i.(item))
-	cpr.queue.Done(i)
-	return true
-}
-
-func (cpr *ControlPlaneRecorder) processItem(i item) {
-	switch i.op {
-	case addPortBinding:
-		cpr.addPortBinding(i.old, i.t)
-	case updatePortBinding:
-		cpr.updatePortBinding(i.old, i.new, i.t)
-	case addPod:
-		cpr.addPod(i.podUID, i.t)
-	case cleanPod:
-		cpr.cleanPod(i.podUID)
-	case addLogicalSwitchPort:
-		cpr.addLSP(i.podUID, i.t)
-	}
-}
-
-// getRecord assumes lock is held by caller and returns record from map with func argument as the key
+// getRecord returns record from map with func argument as the key
 func (cpr *ControlPlaneRecorder) getRecord(podUID kapimtypes.UID) *record {
 	r, ok := cpr.podRecords[podUID]
 	if !ok {
@@ -679,6 +814,235 @@ func getPodUIDFromPortBinding(row *sbdb.PortBinding) kapimtypes.UID {
 		return ""
 	}
 	return kapimtypes.UID(podUID)
+}
+
+func (cpr *ControlPlaneRecorder) IsConfigDurationEnabled() bool {
+	return cpr.enabled
+}
+
+// RecordConfigDuration allows the caller to request measurement of a configuration, as a metric,
+// the duration between the argument start and OVN applying the configuration to all nodes.
+// It will return ovsdb operations which a user can add to existing operations they wish to track.
+// Upon successful transaction of the operations to the ovsdb server, the user must call a call-back function to
+// lock-in the request to measure and report. Failure to call the call-back function, will result in no measurement and
+// no metrics reported. Not every call will return operations to report the duration and if so, the call-back will be a
+// no-op if the function is called. If start time is zero, we return a no-op.
+func (cpr *ControlPlaneRecorder) RecordConfigDuration(nbClient libovsdbclient.Client, kind string, start time.Time) (
+	[]ovsdb.Operation, func(), error) {
+	if !cpr.enabled || !cpr.isPeriodToTrack() || start.IsZero() {
+		return []ovsdb.Operation{}, func() {}, nil
+	}
+	if nbClient.Schema().Name != "OVN_Northbound" {
+		return []ovsdb.Operation{}, func() {}, fmt.Errorf("expected OVN_Northbound libovsdb client but got %q",
+			nbClient.Schema().Name)
+	}
+
+	_, ok := cpr.reportKind[kind]
+	if !ok {
+		return []ovsdb.Operation{}, func() {}, fmt.Errorf("unknown kind %q", kind)
+	}
+
+	nbGlobal, err := libovsdbops.FindNBGlobal(nbClient)
+	if err != nil {
+		return []ovsdb.Operation{}, func() {}, fmt.Errorf("failed to find OVN Northbound NB_Global table"+
+			" entry: %v", err)
+	}
+	ops, err := nbClient.Where(nbGlobal).Mutate(nbGlobal, model.Mutation{
+		Field:   &nbGlobal.NbCfg,
+		Mutator: ovsdb.MutateOperationAdd,
+		Value:   1,
+	})
+	if err != nil {
+		return []ovsdb.Operation{}, func() {}, fmt.Errorf("failed to create update operation: %v", err)
+	}
+
+	return ops, func() {
+		if !cpr.queueFull() {
+			// there can be a race condition here where we queue the wrong (nb)Cfg value, but it is ok as long as it is
+			// less than or equal the hv_cfg value we see and this is the case because of atomic increments for nb_cfg
+			cpr.queue.Add(&item{addNBGlobal, nil, &configEvent{kind: kind,
+				kindStartTimestamp: int(start.UnixMilli()), txStartTimestamp: int(time.Now().UnixMilli()),
+				cfg: nbGlobal.NbCfg + 1}})
+		}
+	}, nil
+}
+
+// runAvailableUpdate will adjust the availability of measurements based on the number of nodes in the cluster
+func (cpr *ControlPlaneRecorder) runAvailableUpdate(kube kube.Interface, stop <-chan struct{}) {
+	// set ticker to a non-zero initial value before we dynamically calculate it based on node count
+	// If there is an error calculating it, revert to this large default value
+	ticker := time.NewTicker(10 * time.Minute)
+	var currentDuration time.Duration
+
+	updateTickerDuration := func() {
+		if nodeCount, err := getNodeCount(kube); err != nil {
+			klog.Errorf("Failed to update ticker duration considering node count: %v", err)
+		} else {
+			newDuration := time.Duration(nodeCount) * delayPerNode
+			if newDuration != currentDuration {
+				cpr.mu.Lock()
+				if newDuration > 0 && ticker != nil {
+					currentDuration = newDuration
+					ticker.Reset(currentDuration)
+				}
+				cpr.mu.Unlock()
+				klog.V(5).Infof("Updated ticker duration to every %v seconds",
+					newDuration.Seconds())
+			}
+		}
+	}
+
+	// initial ticker duration adjustment
+	updateTickerDuration()
+
+	go func() {
+		nodeCheckTicker := time.NewTicker(nodeCheckPeriod)
+		defer nodeCheckTicker.Stop()
+		for {
+			select {
+			case <-nodeCheckTicker.C:
+				updateTickerDuration()
+			case <-stop:
+				return
+			}
+		}
+	}()
+
+	go func() {
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				cpr.mu.Lock()
+				cpr.available = true
+				cpr.mu.Unlock()
+			case <-stop:
+				return
+			}
+		}
+	}()
+}
+
+// runStopSignal will close channel arg cdStop if arg stop triggers or node count size is above nodeLimit
+func (cpr *ControlPlaneRecorder) runStopSignal(kube kube.Interface, cdStop chan struct{}, stop <-chan struct{}) {
+	// determine when to stop serving. End can occur when stop channel signal received or due to node count
+	go func() {
+		tick := time.NewTicker(nodeCheckPeriod)
+		defer func() {
+			tick.Stop()
+			cpr.enabled = false
+			close(cdStop)
+		}()
+		for {
+			select {
+			case <-tick.C:
+				if count, err := getNodeCount(kube); err != nil && count > nodeLimit {
+					klog.Infof(stopMsg, nodeLimit)
+					return
+				}
+			case <-stop:
+				return
+			}
+		}
+	}()
+}
+
+func (cpr *ControlPlaneRecorder) isPeriodToTrack() bool {
+	cpr.mu.Lock()
+	defer cpr.mu.Unlock()
+	if cpr.available {
+		cpr.available = false
+		return true
+	}
+	return false
+}
+
+func getNodeCount(kube kube.Interface) (int, error) {
+	nodes, err := kube.GetNodes()
+	if err != nil {
+		return 0, fmt.Errorf("unable to retrieve node list: %v", err)
+	}
+	return len(nodes.Items), nil
+}
+
+func (cpr *ControlPlaneRecorder) updateNBGlobal(hvCfg, hvCfgTimestamp int) {
+	var gcIndex, delta int
+	for _, cr := range cpr.configRecords {
+		// OVN-Controllers may not report back that they have installed the config associated with every nb_cfg value.
+		// For example if we incremented nb_cfg rapidly to 1,2 and 3, the CMS may only see hv_cfg value of 3.
+		// We assume that the updates associated with 1,2 are completed when we see a larger value.
+		if cr.cfg <= hvCfg {
+			metricConfigDurationEndCount.Inc()
+			h, ok := cpr.reportKind[cr.kind]
+			if !ok {
+				klog.Errorf("Failed to find kind %q. Unable to report its metric", cr.kind)
+				continue
+			}
+			// delta is milliseconds
+			delta = hvCfgTimestamp - cr.kindStartTimestamp
+			if delta < 0 {
+				klog.Error("Unexpected negative timestamp between hv_cfg timestamp and kind start timestamp. Discarding")
+				continue
+			}
+			h.Observe(float64(delta) / 1000)
+			delta = hvCfgTimestamp - cr.txStartTimestamp
+			if delta < 0 {
+				klog.Error("Unexpected negative timestamp between hv_cfg timestamp and tx start timestamp. Discarding")
+				continue
+			}
+			metricConfigDurationOvnLatency.Observe(float64(delta) / 1000)
+		} else {
+			// In order to not incur the overhead of copying to a new slice, we save c pointer for
+			// later processing
+			cpr.configRecords[gcIndex] = cr
+			gcIndex++
+		}
+	}
+	// Set processed pointers to nil to allow GC
+	for i := gcIndex; i < len(cpr.configRecords); i++ {
+		cpr.configRecords[i] = nil
+	}
+	// Re-adjust slice size. Keep underlying array and compact it
+	cpr.configRecords = cpr.configRecords[:gcIndex]
+}
+
+func (cpr *ControlPlaneRecorder) queueFull() bool {
+	return cpr.queue.Len() > queueLimit
+}
+
+func (cpr *ControlPlaneRecorder) runWorker() {
+	for cpr.processNextItem() {
+	}
+}
+
+func (cpr *ControlPlaneRecorder) processNextItem() bool {
+	i, term := cpr.queue.Get()
+	if term {
+		return false
+	}
+	cpr.processItem(i.(*item))
+	cpr.queue.Done(i)
+	return true
+}
+
+func (cpr *ControlPlaneRecorder) processItem(i *item) {
+	switch i.op {
+	case addPortBinding:
+		cpr.addPortBinding(i.p.old, i.p.timestamp)
+	case updatePortBinding:
+		cpr.updatePortBinding(i.p.old, i.p.new, i.p.timestamp)
+	case addPod:
+		cpr.podRecords[i.p.uid] = &record{timestamp: i.p.timestamp, timestampType: firstSeen}
+	case cleanPod:
+		delete(cpr.podRecords, i.p.uid)
+	case addLogicalSwitchPort:
+		cpr.addLSP(i.p.uid, i.p.timestamp)
+	case addNBGlobal:
+		metricConfigDurationStartCount.Inc()
+		cpr.configRecords = append(cpr.configRecords, i.c)
+	case updateNBGlobal:
+		cpr.updateNBGlobal(i.c.cfg, i.c.kindStartTimestamp)
+	}
 }
 
 // setNbE2eTimestamp return true if setting timestamp to NB global options is successful
