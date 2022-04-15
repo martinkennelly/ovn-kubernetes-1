@@ -308,6 +308,9 @@ type MetricsConfig struct {
 	BindAddress           string `gcfg:"bind-address"`
 	OVNMetricsBindAddress string `gcfg:"ovn-metrics-bind-address"`
 	EnablePprof           bool   `gcfg:"enable-pprof"`
+	// EnableConfigDuration holds the boolean flag to enable OVN-Kubernetes master to monitor OVN-Kubernetes master
+	// configuration duration applied to all nodes
+	EnableConfigDuration bool `gcfg:"enable-config-duration"`
 }
 
 // OVNKubernetesFeatureConfig holds OVN-Kubernetes feature enhancement config file parameters and command-line overrides
@@ -937,6 +940,11 @@ var MetricsFlags = []cli.Flag{
 		Usage:       "If true, then also accept pprof requests on the metrics port.",
 		Destination: &cliConfig.Metrics.EnablePprof,
 		Value:       Metrics.EnablePprof,
+	},
+	&cli.BoolFlag{
+		Name:        "enable-config-duration",
+		Usage:       "Enables monitoring OVN-Kubernetes master duration to apply configuration to all nodes",
+		Destination: &cliConfig.Metrics.EnableConfigDuration,
 	},
 }
 

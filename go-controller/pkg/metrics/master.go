@@ -248,6 +248,34 @@ var metricPortBindingUpLatency = prometheus.NewHistogram(prometheus.HistogramOpt
 	Buckets:   prometheus.ExponentialBuckets(.01, 2, 15),
 })
 
+var metricConfigDurationStartCount = prometheus.NewCounter(prometheus.CounterOpts{
+	Namespace: MetricOvnkubeNamespace,
+	Subsystem: MetricOvnkubeSubsystemMaster,
+	Name:      "config_duration_start_total",
+	Help:      "The total number of configuration duration monitors started",
+})
+
+// metricConfigDurationEndCount in conjunction with metricConfigDurationStartCount can be used to detect hung OVN-Controllers
+var metricConfigDurationEndCount = prometheus.NewCounter(prometheus.CounterOpts{
+	Namespace: MetricOvnkubeNamespace,
+	Subsystem: MetricOvnkubeSubsystemMaster,
+	Name:      "config_duration_end_total",
+	Help:      "The total number of configuration duration monitors ended",
+})
+
+var metricConfigDurationOvnLatency = prometheus.NewHistogram(prometheus.HistogramOpts{
+	Namespace: MetricOvnkubeNamespace,
+	Subsystem: MetricOvnkubeSubsystemMaster,
+	Name:      "network_programming_ovn_duration_seconds",
+	Help:      "The duration between a transaction sent to OVN and applied to all nodes",
+	Buckets: merge(
+		prometheus.LinearBuckets(0.25, 0.25, 2), // 0.25s, 0.50s
+		prometheus.LinearBuckets(1, 1, 59),      // 1s, 2s, 3s, ... 59s
+		prometheus.LinearBuckets(60, 5, 12),     // 60s, 65s, 70s, ... 115s
+		prometheus.LinearBuckets(120, 30, 11),   // 2min, 2.5min, 3min, ..., 7min
+	),
+})
+
 const (
 	globalOptionsTimestampField     = "e2e_timestamp"
 	globalOptionsProbeIntervalField = "northd_probe_interval"
@@ -685,6 +713,374 @@ func getPodUIDFromPortBinding(row *sbdb.PortBinding) kapimtypes.UID {
 	return kapimtypes.UID(podUID)
 }
 
+const (
+	startRecordChSize = 350
+	endRecordChSize   = 400
+	stopMsg           = "Stopping config duration monitor due to node count greater than %d " +
+		"to protect southbound database from overload"
+	chFullMsg = "Skip record config duration due to channel full"
+	// node limit to prevent SB DB pressure when large node counts
+	nodeLimit       = 100
+	nbGlobalTable   = "NB_Global"
+	PodKindName     = "pod"
+	ServiceKindName = "service"
+)
+
+type startRecordEvent struct {
+	kind               string
+	kindStartTimestamp int
+	txStartTimestamp   int
+	nbCfg              int
+}
+
+type endRecordEvent struct {
+	hvCfgTimestamp int
+	hvCfg          int
+}
+
+type ConfigDurationRecorder struct {
+	mu              sync.Mutex
+	enabled         bool
+	recordAvailable bool
+	reportKind      map[string]prometheus.Histogram
+	startRecords    []*startRecordEvent
+	startRecordCh   chan startRecordEvent
+	endRecordCh     chan endRecordEvent
+}
+
+// global variable is needed because this functionality is accessed in many functions
+var cdr *ConfigDurationRecorder
+
+func GetConfigDurationRecorder() *ConfigDurationRecorder {
+	if cdr == nil {
+		cdr = &ConfigDurationRecorder{}
+	}
+	return cdr
+}
+
+var configDurationRegOnce sync.Once
+
+//Run monitors the config duration for OVN-Kube master to configure k8 kinds
+func (cdr *ConfigDurationRecorder) Run(nbClient libovsdbclient.Client, kube kube.Interface, delayPerNode,
+	checkPeriod time.Duration, stop <-chan struct{}) {
+	// ** configuration duration monitor - intro **
+	// We measure the duration to configure whatever k8 kind (pod, services, etc.) object to all nodes and reports
+	// this as a metric. This will give a rough upper bound of how long it takes OVN-Kubernetes master container (CMS)
+	// and OVN to configure all nodes under its control.
+
+	// When the CMS is about to make a transaction to configure whatever kind, config duration monitor provides a
+	// mechanism to allow the caller to pass the time when the CMS first started processing the kind it wants to measure.
+	// This time is stored for later processing and is used as the start time.
+	// An operation is returned to the caller, which they can bundle with their existing transactions sent to OVN which
+	// will tell OVN to measure how long it takes to configure all nodes with the config in the transaction.
+	// Config duration then waits for OVN to configure all nodes and calculates the time delta.
+	// The measurements are limited and are only allowed during certain time periods to reduce the stress on OVN.
+
+	// ** configuration duration monitor - caveats **
+	// The duration described above does not give you an exact time duration for how long it takes to configure your
+	// k8 kind. When you are recording how long it takes OVN to complete your configuration to all nodes, other
+	// transactions may have occurred which may increases the overall time. You may also get longer processing times if one
+	// or more nodes are unavailable because we are measuring how long the functionality takes to apply to ALL nodes.
+
+	// ** configuration duration monitor - How the duration of the config is measured within OVN **
+	// We increment the nb_cfg integer value in the NB_Global table.
+	// ovn-northd notices the nb_cfg change and copies the nb_cfg value to SB_Global table field nb_cfg along with any
+	// other configuration that is changed in OVN Northbound database.
+	// All ovn-controllers detects nb_cfg value change and generates a 'barrier' on the openflow connection to the
+	// nodes ovs-vswitchd. Once ovn-controllers receive the 'barrier processed' reply from ovs-vswitchd which
+	// indicates that all relevant openflow operations associated with NB_Globals nb_cfg value have been
+	// propagated to the nodes OVS, it copies the SB_Global nb_cfg value to its Chassis_Private table nb_cfg record.
+	// ovn-northd detects changes to the Chassis_Private startRecords and computes the minimum nb_cfg for all Chassis_Private
+	// nb_cfg and stores this in NB_Global hv_cfg field along with a timestamp to field hv_cfg_timestamp which
+	// reflects the time when the slowest chassis catches up with the northbound configuration.
+
+	// create a map with key as the name of the k8 kind you want to measure and value with the histogram to report
+	// the duration to configure the kind to all nodes. Suggestion to name the key like so: {k8 kind}. E.g. pod
+	cdr.reportKind = make(map[string]prometheus.Histogram)
+	// register metrics which will take account of configuration start time and the time it
+	// takes OVN to configure all nodes. Note that the result will only give an upper bound limit of how long it
+	// takes to roll out the configuration to all nodes. To make matters more uncertain, the measurements are currently
+	// sampled.
+	cdr.reportKind[PodKindName] = prometheus.NewHistogram(prometheus.HistogramOpts{
+		Namespace: MetricOvnkubeNamespace,
+		Subsystem: MetricOvnkubeSubsystemMaster,
+		Name:      "network_programming_pod_duration_seconds",
+		Help:      "Upperbound time to configure a pod from when its seen after pod handler and config is applied to all nodes",
+		Buckets:   prometheus.ExponentialBuckets(.01, 3, 11),
+	})
+	cdr.reportKind[ServiceKindName] = prometheus.NewHistogram(prometheus.HistogramOpts{
+		Namespace: MetricOvnkubeNamespace,
+		Subsystem: MetricOvnkubeSubsystemMaster,
+		Name:      "network_programming_service_duration_seconds",
+		Help:      "Upperbound time to configure a service from when its popped off a work queue and config is applied to all nodes",
+		Buckets:   prometheus.ExponentialBuckets(.01, 3, 11),
+	})
+	configDurationRegOnce.Do(func() {
+		prometheus.MustRegister(cdr.reportKind[PodKindName])
+		prometheus.MustRegister(cdr.reportKind[ServiceKindName])
+		prometheus.MustRegister(metricConfigDurationStartCount)
+		prometheus.MustRegister(metricConfigDurationEndCount)
+		prometheus.MustRegister(metricConfigDurationOvnLatency)
+	})
+
+	// we currently do not clean the follow channels up upon exit
+	cdr.startRecordCh = make(chan startRecordEvent, startRecordChSize)
+	cdr.endRecordCh = make(chan endRecordEvent, endRecordChSize)
+	go cdr.processChannelEvents(stop)
+
+	// determine if we should be enabled or not during runtime
+	cdr.enabled = true
+	cdr.runEnable(kube, checkPeriod, nodeLimit, stop)
+
+	// record measurements are only available during periods of time. We use a ticker to set the availability of measurements.
+	// The ticker duration is continuously updated and is proportional to the node count.
+	// Determine the period (for the ticker) which record measurements are available. This can be updated during the runtime.
+	availableTicker := time.NewTicker(10 * time.Minute)
+	cdr.runRecordAvailableDuration(kube, availableTicker, delayPerNode, checkPeriod, stop)
+	// update the availability of measurements based on the duration determined above
+	cdr.runRecordAvailable(availableTicker, stop)
+
+	nbClient.Cache().AddEventHandler(&cache.EventHandlerFuncs{
+		UpdateFunc: func(table string, old model.Model, new model.Model) {
+			if table != nbGlobalTable {
+				return
+			}
+			// disable adding items to queue if functionality is disabled due to large node count
+			if !cdr.enabled {
+				return
+			}
+			oldRow := old.(*nbdb.NBGlobal)
+			newRow := new.(*nbdb.NBGlobal)
+
+			if oldRow.HvCfg != newRow.HvCfg && oldRow.HvCfgTimestamp != newRow.HvCfgTimestamp && newRow.HvCfgTimestamp > 0 {
+				select {
+				case cdr.endRecordCh <- endRecordEvent{hvCfg: newRow.HvCfg, hvCfgTimestamp: newRow.HvCfgTimestamp}:
+				default:
+					klog.Warning(chFullMsg)
+				}
+			}
+		},
+	})
+}
+
+// RecordConfigDuration allows the caller to request measurement of a configuration, as a metric,
+// the duration between the argument start and OVN applying the configuration to all nodes.
+// It will return ovsdb operations which a user can add to existing operations they wish to track.
+// Upon successful transaction of the operations to the ovsdb server, the user must call a call-back function to
+// lock-in the request to measure and report. Failure to call the call-back function, will result in no measurement and
+// no metrics reported. Not every call will return operations to report the duration and if so, the call-back will be a
+// no-op if the function is called. If start time is zero, we return a no-op.
+func (cdr *ConfigDurationRecorder) RecordConfigDuration(nbClient libovsdbclient.Client, kind string, start time.Time) (
+	[]ovsdb.Operation, func(), error) {
+	if !cdr.enabled || !cdr.isPeriodToTrack() || start.IsZero() {
+		return []ovsdb.Operation{}, func() {}, nil
+	}
+	if len(cdr.startRecordCh) >= startRecordChSize {
+		klog.Warning(chFullMsg)
+		return []ovsdb.Operation{}, func() {}, nil
+	}
+	if nbClient.Schema().Name != "OVN_Northbound" {
+		return []ovsdb.Operation{}, func() {}, fmt.Errorf("expected OVN_Northbound libovsdb client but got %q",
+			nbClient.Schema().Name)
+	}
+
+	_, ok := cdr.reportKind[kind]
+	if !ok {
+		return []ovsdb.Operation{}, func() {}, fmt.Errorf("unknown kind %q", kind)
+	}
+
+	nbGlobal, err := libovsdbops.FindNBGlobal(nbClient)
+	if err != nil {
+		return []ovsdb.Operation{}, func() {}, fmt.Errorf("failed to find OVN Northbound NB_Global table"+
+			" entry: %v", err)
+	}
+	ops, err := nbClient.Where(nbGlobal).Mutate(nbGlobal, model.Mutation{
+		Field:   &nbGlobal.NbCfg,
+		Mutator: ovsdb.MutateOperationAdd,
+		Value:   1,
+	})
+	if err != nil {
+		return []ovsdb.Operation{}, func() {}, fmt.Errorf("failed to create update operation: %v", err)
+	}
+
+	return ops, func() {
+		// there can be a race condition here where we queue the wrong (nb)Cfg value, but it is ok as long as it is
+		// less than or equal the hv_cfg value we see and this is the case because of atomic increments for nb_cfg
+		select {
+		case cdr.startRecordCh <- startRecordEvent{kind: kind, kindStartTimestamp: int(start.UnixMilli()),
+			txStartTimestamp: int(time.Now().UnixMilli()), nbCfg: nbGlobal.NbCfg + 1}:
+		default:
+			klog.Warningf("Unable to start config duration recording due to queue full")
+		}
+	}, nil
+}
+
+func (cdr *ConfigDurationRecorder) processChannelEvents(stop <-chan struct{}) {
+	for {
+		select {
+		case <-stop:
+			return
+		case sRec := <-cdr.startRecordCh:
+			metricConfigDurationStartCount.Inc()
+			cdr.startRecords = append(cdr.startRecords, &sRec)
+		case eRec := <-cdr.endRecordCh:
+			cdr.processEndRecord(eRec.hvCfg, eRec.hvCfgTimestamp)
+		}
+	}
+}
+
+// runRecordAvailableDuration will adjust the availability of measurements based on the number of nodes in the cluster
+func (cdr *ConfigDurationRecorder) runRecordAvailableDuration(kube kube.Interface, ticker *time.Ticker, delayPerNode,
+	nodeCheckPeriod time.Duration, stop <-chan struct{}) {
+	var currentDuration time.Duration
+
+	updateTickerDuration := func() {
+		if nodeCount, err := getNodeCount(kube); err != nil {
+			klog.Errorf("Failed to update configuration duration available ticker duration considering node"+
+				" count: %v", err)
+		} else {
+			newDuration := time.Duration(nodeCount) * delayPerNode
+			if newDuration != currentDuration {
+				cdr.mu.Lock()
+				if newDuration > 0 && ticker != nil {
+					currentDuration = newDuration
+					ticker.Reset(currentDuration)
+				}
+				cdr.mu.Unlock()
+				klog.V(5).Infof("Updated configuration duration available measurement period to every %f seconds",
+					newDuration.Seconds())
+			}
+		}
+	}
+
+	// initial ticker duration adjustment
+	updateTickerDuration()
+
+	go func() {
+		nodeCheckTicker := time.NewTicker(nodeCheckPeriod)
+		defer nodeCheckTicker.Stop()
+		for {
+			select {
+			case <-nodeCheckTicker.C:
+				updateTickerDuration()
+			case <-stop:
+				return
+			}
+		}
+	}()
+}
+
+func (cdr *ConfigDurationRecorder) runRecordAvailable(ticker *time.Ticker, stop <-chan struct{}) {
+	cdr.recordAvailable = true
+	go func() {
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				cdr.mu.Lock()
+				cdr.recordAvailable = true
+				cdr.mu.Unlock()
+			case <-stop:
+				return
+			}
+		}
+	}()
+}
+
+// runEnable will disable, if arg stop triggers or node count size is above nodeLimit
+func (cdr *ConfigDurationRecorder) runEnable(kube kube.Interface, checkPeriod time.Duration, nodeLimit int, stop <-chan struct{}) {
+	// determine when to serve and stop serving
+
+	configEnable := func() {
+		if count, err := getNodeCount(kube); err == nil && count >= nodeLimit {
+			if cdr.enabled {
+				cdr.enabled = false
+				klog.Infof(stopMsg, nodeLimit)
+			}
+		} else {
+			if !cdr.enabled {
+				cdr.enabled = true
+				klog.Infof("Starting configuration duration recorder because node count under %d", nodeLimit)
+			}
+		}
+	}
+
+	configEnable()
+
+	go func() {
+		tick := time.NewTicker(checkPeriod)
+		defer tick.Stop()
+		for {
+			select {
+			case <-tick.C:
+				configEnable()
+			case <-stop:
+				cdr.enabled = false
+				return
+			}
+		}
+	}()
+}
+
+func (cdr *ConfigDurationRecorder) isPeriodToTrack() bool {
+	cdr.mu.Lock()
+	defer cdr.mu.Unlock()
+	if cdr.recordAvailable {
+		cdr.recordAvailable = false
+		return true
+	}
+	return false
+}
+
+func getNodeCount(kube kube.Interface) (int, error) {
+	nodes, err := kube.GetNodes()
+	if err != nil {
+		return 0, fmt.Errorf("unable to retrieve node list: %v", err)
+	}
+	return len(nodes.Items), nil
+}
+
+func (cdr *ConfigDurationRecorder) processEndRecord(hvCfg, hvCfgTimestamp int) {
+	var gcIndex, delta int
+	for _, cr := range cdr.startRecords {
+		// OVN-Controllers may not report back that they have installed the config associated with every nb_cfg value.
+		// For example if we incremented nb_cfg rapidly to 1,2 and 3, the CMS may only see hv_cfg value of 3.
+		// We assume that the updates associated with 1,2 are completed when we see a larger value.
+		if cr.nbCfg <= hvCfg {
+			metricConfigDurationEndCount.Inc()
+			h, ok := cdr.reportKind[cr.kind]
+			if !ok {
+				klog.Errorf("Failed to find kind %q. Unable to report its metric", cr.kind)
+				continue
+			}
+			// delta is milliseconds
+			delta = hvCfgTimestamp - cr.kindStartTimestamp
+			if delta < 0 {
+				klog.Error("Unexpected negative timestamp between hv_cfg timestamp and kind start timestamp. Discarding")
+				continue
+			}
+			h.Observe(float64(delta) / 1000)
+			delta = hvCfgTimestamp - cr.txStartTimestamp
+			if delta < 0 {
+				klog.Error("Unexpected negative timestamp between hv_cfg timestamp and tx start timestamp. Discarding")
+				continue
+			}
+			metricConfigDurationOvnLatency.Observe(float64(delta) / 1000)
+		} else {
+			// In order to not incur the overhead of copying to a new slice, we save c pointer for
+			// later processing
+			cdr.startRecords[gcIndex] = cr
+			gcIndex++
+		}
+	}
+	// Set processed pointers to nil to allow GC
+	for i := gcIndex; i < len(cdr.startRecords); i++ {
+		cdr.startRecords[i] = nil
+	}
+	// Re-adjust slice size. Keep underlying array and compact it
+	cdr.startRecords = cdr.startRecords[:gcIndex]
+}
+
 // setNbE2eTimestamp return true if setting timestamp to NB global options is successful
 func setNbE2eTimestamp(ovnNBClient libovsdbclient.Client, timestamp int64) bool {
 	// assumption that only first row is relevant in NB_Global table
@@ -729,4 +1125,13 @@ func getGlobalOptionsValue(client libovsdbclient.Client, field string) float64 {
 			return value
 		}
 	}
+}
+
+// merge direct copy from k8 pkg/proxy/metrics/metrics.go
+func merge(slices ...[]float64) []float64 {
+	result := make([]float64, 1)
+	for _, s := range slices {
+		result = append(result, s...)
+	}
+	return result
 }

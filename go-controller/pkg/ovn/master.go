@@ -221,6 +221,9 @@ func (oc *Controller) StartClusterMaster() error {
 	metrics.RegisterMasterFunctional()
 	metrics.RunTimestamp(oc.stopChan, oc.sbClient, oc.nbClient)
 	metrics.MonitorIPSec(oc.nbClient)
+	if config.Metrics.EnableConfigDuration {
+		metrics.GetConfigDurationRecorder().Run(oc.nbClient, oc.kube, time.Second, time.Hour, oc.stopChan)
+	}
 	oc.podRecorder.Run(oc.sbClient, oc.stopChan)
 
 	// enableOVNLogicalDataPathGroups sets an OVN flag to enable logical datapath
