@@ -786,7 +786,7 @@ func (cdr *ConfigDurationRecorder) Run(nbClient libovsdbclient.Client, kube kube
 	// We increment the nb_cfg integer value in the NB_Global table.
 	// ovn-northd notices the nb_cfg change and copies the nb_cfg value to SB_Global table field nb_cfg along with any
 	// other configuration that is changed in OVN Northbound database.
-	// All ovn-controllers detects nb_cfg value change and generates a 'barrier' on the openflow connection to the
+	// All ovn-controllers detect nb_cfg value change and generate a 'barrier' on the openflow connection to the
 	// nodes ovs-vswitchd. Once ovn-controllers receive the 'barrier processed' reply from ovs-vswitchd which
 	// indicates that all relevant openflow operations associated with NB_Globals nb_cfg value have been
 	// propagated to the nodes OVS, it copies the SB_Global nb_cfg value to its Chassis_Private table nb_cfg record.
