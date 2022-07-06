@@ -18,6 +18,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/kubernetes/test/e2e/framework"
 	e2enode "k8s.io/kubernetes/test/e2e/framework/node"
+	e2eskipper "k8s.io/kubernetes/test/e2e/framework/skipper"
 	utilnet "k8s.io/utils/net"
 )
 
@@ -52,6 +53,17 @@ var _ = ginkgo.Describe("Egress Services", func() {
 				"Test requires >= 3 Ready nodes, but there are only %v nodes",
 				len(n.Items))
 		}
+		testsSkipped = true
+		multiZones := isInterconnectEnabled()
+		if err != nil {
+			framework.Failf("Failed to get the node zones : %v", err)
+		}
+		if multiZones {
+			e2eskipper.Skipf(
+				"Egress services are not yet supported with multiple zones interconnect deployment",
+			)
+		}
+		testsSkipped = false
 		nodes = n.Items
 		ginkgo.By("Creating the external kind container to send the traffic to/from")
 		externalKindIPv4, externalKindIPv6 = createClusterExternalContainer(externalKindContainerName, agnhostImage,
