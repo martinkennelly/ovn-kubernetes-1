@@ -40,6 +40,7 @@ type networkAttachmentConfig struct {
 	topology     string
 	networkName  string
 	vlanID       int
+	isIPv6       bool
 }
 
 func (nac networkAttachmentConfig) attachmentName() string {
