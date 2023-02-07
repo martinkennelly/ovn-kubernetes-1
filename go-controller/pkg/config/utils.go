@@ -137,6 +137,7 @@ const (
 	configSubnetCluster configSubnetType = "cluster subnet"
 	configSubnetService configSubnetType = "service subnet"
 	configSubnetHybrid  configSubnetType = "hybrid overlay subnet"
+	configTransitSwitch configSubnetType = "transit switch subnet"
 )
 
 type configSubnet struct {
