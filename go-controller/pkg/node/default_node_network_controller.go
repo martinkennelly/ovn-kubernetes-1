@@ -895,6 +895,16 @@ func (nc *DefaultNodeNetworkController) startEgressIPHealthCheckingServer(mgmtPo
 		defer nc.wg.Done()
 		healthServer.Run(nc.stopChan)
 	}()
+
+	// start monitoring of egress ips for node
+	eip_node_mgr := newEgressIpNodeManager(n.name, n.watchFactory)
+	eip_node_mgr.Run(n.stopChan, n.wg)
+
+	// go wait.Until(func() {
+	// 	checkSecondaryEgressIPAddresses(n.name,
+	// 		n.watchFactory.(*factory.WatchFactory))
+	// }, time.Minute, n.stopChan)
+
 	return nil
 }
 
