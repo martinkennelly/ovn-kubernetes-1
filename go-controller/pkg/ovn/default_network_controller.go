@@ -8,7 +8,6 @@ import (
 	"sync"
 	"time"
 
-	ocpcloudnetworkapi "github.com/openshift/api/cloudnetwork/v1"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/config"
 	egressfirewall "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/egressfirewall/v1"
 	egressipv1 "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/egressip/v1"
@@ -88,7 +87,7 @@ type DefaultNetworkController struct {
 	defaultCOPPUUID string
 
 	// Controller used for programming OVN for egress IP
-	eIPC egressIPController
+	eIPC egressIPZoneController
 
 	// Controller used to handle services
 	svcController *svccontroller.Controller
@@ -122,9 +121,6 @@ type DefaultNetworkController struct {
 	nodeClusterRouterPortFailed sync.Map
 	hybridOverlayFailed         sync.Map
 	syncZoneICFailed            sync.Map
-
-	// retry framework for Cloud private IP config
-	retryCloudPrivateIPConfig *retry.RetryFramework
 
 	// variable to determine if all pods present on the node during startup have been processed
 	// updated atomically
@@ -189,18 +185,12 @@ func newDefaultNetworkControllerCommon(cnci *CommonNetworkControllerInfo,
 		},
 		externalGWCache: make(map[ktypes.NamespacedName]*externalRouteInfo),
 		exGWCacheMutex:  sync.RWMutex{},
-		eIPC: egressIPController{
-			egressIPAssignmentMutex:           &sync.Mutex{},
-			podAssignmentMutex:                &sync.Mutex{},
-			podAssignment:                     make(map[string]*podAssignmentState),
-			pendingCloudPrivateIPConfigsMutex: &sync.Mutex{},
-			pendingCloudPrivateIPConfigsOps:   make(map[string]map[string]*cloudPrivateIPConfigOp),
-			allocator:                         allocator{&sync.Mutex{}, make(map[string]*egressNode)},
-			nbClient:                          cnci.nbClient,
-			watchFactory:                      cnci.watchFactory,
-			egressIPTotalTimeout:              config.OVNKubernetesFeature.EgressIPReachabiltyTotalTimeout,
-			reachabilityCheckInterval:         egressIPReachabilityCheckInterval,
-			egressIPNodeHealthCheckPort:       config.OVNKubernetesFeature.EgressIPNodeHealthCheckPort,
+		eIPC: egressIPZoneController{
+			egressIPAssignmentMutex: &sync.Mutex{},
+			podAssignmentMutex:      &sync.Mutex{},
+			podAssignment:           make(map[string]*podAssignmentState),
+			nbClient:                cnci.nbClient,
+			watchFactory:            cnci.watchFactory,
 		},
 		loadbalancerClusterCache:     make(map[kapi.Protocol]string),
 		clusterLoadBalancerGroupUUID: "",
@@ -236,7 +226,6 @@ func (oc *DefaultNetworkController) initRetryFramework() {
 	oc.retryEgressIPPods = oc.newRetryFramework(factory.EgressIPPodType)
 	oc.retryEgressNodes = oc.newRetryFramework(factory.EgressNodeType)
 	oc.retryEgressFwNodes = oc.newRetryFramework(factory.EgressFwNodeType)
-	oc.retryCloudPrivateIPConfig = oc.newRetryFramework(factory.CloudPrivateIPConfigType)
 	oc.retryNamespaces = oc.newRetryFramework(factory.NamespaceType)
 	oc.retryNetworkPolicies = oc.newRetryFramework(factory.PolicyType)
 }
@@ -455,11 +444,6 @@ func (oc *DefaultNetworkController) Run(ctx context.Context) error {
 		}
 		if err := WithSyncDurationMetric("egress ip", oc.WatchEgressIP); err != nil {
 			return err
-		}
-		if util.PlatformTypeIsEgressIPCloudProvider() {
-			if err := WithSyncDurationMetric("could private ip config", oc.WatchCloudPrivateIPConfig); err != nil {
-				return err
-			}
 		}
 		if config.OVNKubernetesFeature.EgressIPReachabiltyTotalTimeout == 0 {
 			klog.V(2).Infof("EgressIP node reachability check disabled")
@@ -769,23 +753,18 @@ func (h *defaultNetworkControllerEventHandler) AddResource(obj interface{}, from
 
 	case factory.EgressNodeType:
 		node := obj.(*kapi.Node)
+		// Add node to zone cache; value will be true if the node is local
+		// to this zone and false if its not
+		h.oc.eIPC.nodeZoneState.Store(node.Name, h.oc.isLocalZoneNode(node))
 		if err := h.oc.setupNodeForEgress(node); err != nil {
 			return err
 		}
 		nodeEgressLabel := util.GetNodeEgressLabel()
 		nodeLabels := node.GetLabels()
 		_, hasEgressLabel := nodeLabels[nodeEgressLabel]
-		if hasEgressLabel {
-			h.oc.setNodeEgressAssignable(node.Name, true)
-		}
 		isReady := h.oc.isEgressNodeReady(node)
-		if isReady {
-			h.oc.setNodeEgressReady(node.Name, true)
-		}
-		isReachable := h.oc.isEgressNodeReachable(node)
-		if hasEgressLabel && isReachable && isReady {
-			h.oc.setNodeEgressReachable(node.Name, true)
-			if err := h.oc.addEgressNode(node.Name); err != nil {
+		if hasEgressLabel && isReady {
+			if err := h.oc.addEgressNode(node); err != nil {
 				return err
 			}
 		}
@@ -797,10 +776,6 @@ func (h *defaultNetworkControllerEventHandler) AddResource(obj interface{}, from
 				node.Name, err)
 			return err
 		}
-
-	case factory.CloudPrivateIPConfigType:
-		cloudPrivateIPConfig := obj.(*ocpcloudnetworkapi.CloudPrivateIPConfig)
-		return h.oc.reconcileCloudPrivateIPConfig(nil, cloudPrivateIPConfig)
 
 	case factory.NamespaceType:
 		ns, ok := obj.(*kapi.Namespace)
@@ -912,7 +887,9 @@ func (h *defaultNetworkControllerEventHandler) UpdateResource(oldObj, newObj int
 	case factory.EgressNodeType:
 		oldNode := oldObj.(*kapi.Node)
 		newNode := newObj.(*kapi.Node)
-
+		// Update node in zone cache; value will be true if node is local
+		// to this zone and false if its not
+		h.oc.eIPC.nodeZoneState.Store(newNode.Name, h.oc.isLocalZoneNode(newNode))
 		// Check if the node's internal addresses changed. If so,
 		// delete and readd the node for egress to update LR policies.
 		// We are only interested in the IPs here, not the subnet information.
@@ -928,14 +905,6 @@ func (h *defaultNetworkControllerEventHandler) UpdateResource(oldObj, newObj int
 			}
 		}
 
-		// Initialize the allocator on every update,
-		// ovnkube-node/cloud-network-config-controller will make sure to
-		// annotate the node with the egressIPConfig, but that might have
-		// happened after we processed the ADD for that object, hence keep
-		// retrying for all UPDATEs.
-		if err := h.oc.initEgressIPAllocator(newNode); err != nil {
-			klog.Warningf("Egress node initialization error: %v", err)
-		}
 		nodeEgressLabel := util.GetNodeEgressLabel()
 		oldLabels := oldNode.GetLabels()
 		newLabels := newNode.GetLabels()
@@ -947,20 +916,16 @@ func (h *defaultNetworkControllerEventHandler) UpdateResource(oldObj, newObj int
 		if !oldHadEgressLabel && !newHasEgressLabel {
 			return nil
 		}
-		h.oc.setNodeEgressAssignable(newNode.Name, newHasEgressLabel)
 		if oldHadEgressLabel && !newHasEgressLabel {
 			klog.Infof("Node: %s has been un-labeled, deleting it from egress assignment", newNode.Name)
-			return h.oc.deleteEgressNode(oldNode.Name)
+			return h.oc.deleteEgressNode(oldNode)
 		}
 		isOldReady := h.oc.isEgressNodeReady(oldNode)
 		isNewReady := h.oc.isEgressNodeReady(newNode)
-		isNewReachable := h.oc.isEgressNodeReachable(newNode)
-		h.oc.setNodeEgressReady(newNode.Name, isNewReady)
 		if !oldHadEgressLabel && newHasEgressLabel {
 			klog.Infof("Node: %s has been labeled, adding it for egress assignment", newNode.Name)
-			if isNewReady && isNewReachable {
-				h.oc.setNodeEgressReachable(newNode.Name, isNewReachable)
-				if err := h.oc.addEgressNode(newNode.Name); err != nil {
+			if isNewReady {
+				if err := h.oc.addEgressNode(newNode); err != nil {
 					return err
 				}
 			} else {
@@ -974,13 +939,12 @@ func (h *defaultNetworkControllerEventHandler) UpdateResource(oldObj, newObj int
 		}
 		if !isNewReady {
 			klog.Warningf("Node: %s is not ready, deleting it from egress assignment", newNode.Name)
-			if err := h.oc.deleteEgressNode(newNode.Name); err != nil {
+			if err := h.oc.deleteEgressNode(newNode); err != nil {
 				return err
 			}
-		} else if isNewReady && isNewReachable {
+		} else if isNewReady {
 			klog.Infof("Node: %s is ready and reachable, adding it for egress assignment", newNode.Name)
-			h.oc.setNodeEgressReachable(newNode.Name, isNewReachable)
-			if err := h.oc.addEgressNode(newNode.Name); err != nil {
+			if err := h.oc.addEgressNode(newNode); err != nil {
 				return err
 			}
 		}
@@ -990,11 +954,6 @@ func (h *defaultNetworkControllerEventHandler) UpdateResource(oldObj, newObj int
 		oldNode := oldObj.(*kapi.Node)
 		newNode := newObj.(*kapi.Node)
 		return h.oc.updateEgressFirewallForNode(oldNode, newNode)
-
-	case factory.CloudPrivateIPConfigType:
-		oldCloudPrivateIPConfig := oldObj.(*ocpcloudnetworkapi.CloudPrivateIPConfig)
-		newCloudPrivateIPConfig := newObj.(*ocpcloudnetworkapi.CloudPrivateIPConfig)
-		return h.oc.reconcileCloudPrivateIPConfig(oldCloudPrivateIPConfig, newCloudPrivateIPConfig)
 
 	case factory.NamespaceType:
 		oldNs, newNs := oldObj.(*kapi.Namespace), newObj.(*kapi.Namespace)
@@ -1060,10 +1019,12 @@ func (h *defaultNetworkControllerEventHandler) DeleteResource(obj, cachedObj int
 		nodeEgressLabel := util.GetNodeEgressLabel()
 		nodeLabels := node.GetLabels()
 		if _, hasEgressLabel := nodeLabels[nodeEgressLabel]; hasEgressLabel {
-			if err := h.oc.deleteEgressNode(node.Name); err != nil {
+			if err := h.oc.deleteEgressNode(node); err != nil {
 				return err
 			}
 		}
+		// Update node in zone cache; remove the node key since node has been deleted.
+		h.oc.eIPC.nodeZoneState.Delete(node.Name)
 		return nil
 
 	case factory.EgressFwNodeType:
@@ -1072,10 +1033,6 @@ func (h *defaultNetworkControllerEventHandler) DeleteResource(obj, cachedObj int
 			return fmt.Errorf("could not cast obj of type %T to *knet.Node", obj)
 		}
 		return h.oc.updateEgressFirewallForNode(node, nil)
-
-	case factory.CloudPrivateIPConfigType:
-		cloudPrivateIPConfig := obj.(*ocpcloudnetworkapi.CloudPrivateIPConfig)
-		return h.oc.reconcileCloudPrivateIPConfig(cloudPrivateIPConfig, nil)
 
 	case factory.NamespaceType:
 		ns := obj.(*kapi.Namespace)
@@ -1116,8 +1073,7 @@ func (h *defaultNetworkControllerEventHandler) SyncFunc(objs []interface{}) erro
 			syncFunc = nil
 
 		case factory.EgressIPPodType,
-			factory.EgressIPType,
-			factory.CloudPrivateIPConfigType:
+			factory.EgressIPType:
 			syncFunc = nil
 
 		case factory.NamespaceType:
