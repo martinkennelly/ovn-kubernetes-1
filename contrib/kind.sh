@@ -1288,3 +1288,4 @@ fi
 if [ "$KIND_INSTALL_PLUGINS" == true ]; then
   install_plugins
 fi
+
