@@ -165,7 +165,8 @@ usage() {
     echo "-sm  | --scale-metrics              Enable scale metrics"
     echo "-cm  | --compact-mode               Enable compact mode, ovnkube master and node run in the same process."
     echo "-ic  | --enable-interconnect        Enable interconnect with each node as a zone (only valid if OVN_HA is false)"
-    echo "-npz | --nodes-per-zone             If interconnect is enabled, number of nodes per zone (Default 1). If this value > 1, then (total k8s nodes (workers + 1) / num of nodes per zone) should be zero."
+    echo "-nz  | --num-zones                  If interconnect is enabled, number of zones (Default 3)"
+    echo "-nnpz| --num-nodes-per-zone         If interconnect is enabled, number of nodes per zone (Default 1)"
     echo "--isolated                          Deploy with an isolated environment (no default gateway)"
     echo "--delete                            Delete current cluster"
     echo "--deploy                            Deploy ovn kubernetes without restarting kind"
@@ -241,6 +242,14 @@ parse_args() {
                                                 KIND_NUM_WORKER=$1
                                                 ;;
             -npz | --nodes-per-zone )           shift
+                                                if ! [[ "$1" =~ ^[0-9]+$ ]]; then
+                                                    echo "Invalid num-nodes-per-zone: $1"
+                                                    usage
+                                                    exit 1
+                                                fi
+                                                KIND_NUM_NODES_PER_ZONE=$1
+                                                ;;
+            -nnpz | --num-nodes-per-zone )      shift
                                                 if ! [[ "$1" =~ ^[0-9]+$ ]]; then
                                                     echo "Invalid num-nodes-per-zone: $1"
                                                     usage
@@ -566,7 +575,12 @@ set_default_params() {
     KIND_NUM_WORKER=${KIND_NUM_WORKER:-2}
   fi
 
-  if [ "$OVN_ENABLE_INTERCONNECT" == true ]; then
+  if [ "$OVN_ENABLE_INTERCONNECT" == false ]; then
+    KIND_NUM_ZONES=1
+  else
+    # Default is 3 zones (ovn-control-plane, ovn-worker, ovn-worker2)
+    KIND_NUM_ZONES=${KIND_NUM_ZONES:-3}
+    # Lets support only node per zone.
     KIND_NUM_NODES_PER_ZONE=${KIND_NUM_NODES_PER_ZONE:-1}
 
     TOTAL_NODES=$((KIND_NUM_WORKER + 1))
