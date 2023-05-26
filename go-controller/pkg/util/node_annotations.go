@@ -689,6 +689,20 @@ func ParseNodeHostAddresses(node *kapi.Node) (sets.Set[string], error) {
 	return sets.New(cfg...), nil
 }
 
+func ParseNodeHostAddressesList(node *kapi.Node) ([]string, error) {
+	addrAnnotation, ok := node.Annotations[ovnNodeHostAddresses]
+	if !ok {
+		return nil, newAnnotationNotSetError("%s annotation not found for node %q", ovnNodeHostAddresses, node.Name)
+	}
+
+	var cfg []string
+	if err := json.Unmarshal([]byte(addrAnnotation), &cfg); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal host addresses annotation %s for node %q: %v",
+			addrAnnotation, node.Name, err)
+	}
+	return cfg, nil
+}
+
 // UpdateNodeIDAnnotation updates the ovnNodeID annotation with the node id in the annotations map
 // and returns it.
 func UpdateNodeIDAnnotation(annotations map[string]interface{}, nodeID int) map[string]interface{} {

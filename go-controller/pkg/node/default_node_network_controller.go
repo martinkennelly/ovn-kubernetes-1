@@ -97,6 +97,7 @@ type DefaultNodeNetworkController struct {
 	// Node healthcheck server for cloud load balancers
 	healthzServer *proxierHealthUpdater
 	routeManager  *routeManager
+	linkManager   *linkNetworkManager
 
 	// retry framework for namespaces, used for the removal of stale conntrack entries for external gateways
 	retryNamespaces *retry.RetryFramework
@@ -116,7 +117,8 @@ func newDefaultNodeNetworkController(cnnci *CommonNodeNetworkControllerInfo, sto
 			stopChan:                        stopChan,
 			wg:                              wg,
 		},
-		routeManager: newRouteManager(true, 2*time.Minute),
+		routeManager: newRouteManager(wg, true, 2*time.Minute),
+		linkManager:  newInterfaceManager("default-network-controller", config.IPv6Mode, config.IPv4Mode),
 	}
 }
 
@@ -630,11 +632,12 @@ func (nc *DefaultNodeNetworkController) Start(ctx context.Context) error {
 	if err := level.Set("5"); err != nil {
 		klog.Errorf("Setting klog \"loglevel\" to 5 failed, err: %v", err)
 	}
-	nc.wg.Add(1)
-	go func() {
-		defer nc.wg.Done()
-		nc.routeManager.run(nc.stopChan)
-	}()
+	go nc.routeManager.run(ctx.Done())
+	if config.OVNKubernetesFeature.EnableEgressIP {
+		nc.wg.Add(1)
+		nc.linkManager.run(ctx.Done(), nc.wg)
+	}
+
 	if node, err = nc.Kube.GetNode(nc.name); err != nil {
 		return fmt.Errorf("error retrieving node %s: %v", nc.name, err)
 	}
@@ -881,9 +884,11 @@ func (nc *DefaultNodeNetworkController) Start(ctx context.Context) error {
 	// start management ports health check
 	for _, mgmtPort := range mgmtPorts {
 		mgmtPort.port.CheckManagementPortHealth(nc.routeManager, mgmtPort.config, nc.stopChan)
-		// Start the health checking server used by egressip, if EgressIPNodeHealthCheckPort is specified
-		if err := nc.startEgressIPHealthCheckingServer(mgmtPort); err != nil {
-			return err
+		if config.OVNKubernetesFeature.EnableEgressIP {
+			// Start the health checking server used by egressip, if EgressIPNodeHealthCheckPort is specified
+			if err := nc.startEgressIPHealthCheckingServer(mgmtPort); err != nil {
+				return err
+			}
 		}
 	}
 
