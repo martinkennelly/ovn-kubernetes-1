@@ -1417,6 +1417,29 @@ func (oc *DefaultNetworkController) addStandByEgressIPAssignment(podKey string, 
 	return nil
 }
 
+func (e *egressIPZoneController) isOVNManagedNetwork(ipStr, nodeName string) (bool, error) {
+	//Todo: what about secondary bridges?
+	eIP := net.ParseIP(ipStr)
+	node, err := e.watchFactory.GetNode(nodeName)
+	if err != nil {
+		return false, err
+	}
+	primaryNetwork, err := util.ParseNodePrimaryIfAddr(node)
+	if err != nil {
+		return false, fmt.Errorf("failed to parse node %s primary network address: %v", node.Name, err)
+	}
+	if utilnet.IsIPv6(eIP) {
+		if primaryNetwork.V6.Net.Contains(eIP) {
+			return true, nil
+		}
+	} else {
+		if primaryNetwork.V4.Net.Contains(eIP) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 // addPodEgressIPAssignment will program OVN with logical router policies
 // (routing pod traffic to the egress node) and NAT objects on the egress node
 // (SNAT-ing to the egress IP).
@@ -1625,7 +1648,7 @@ func (e *egressIPZoneController) getTransitSwitchIP(nodeName string) (string, er
 	return transitSwitchIP[0].IP.String(), nil
 }
 
-// createReroutePolicyOps creates an operation that does idempotent updates of the
+// createRerouteGatewayPolicyOps creates an operation that does idempotent updates of the
 // LogicalRouterPolicy corresponding to the egressIP status item, according to the
 // following update procedure:
 // - if the LogicalRouterPolicy does not exist: it adds it by creating the
@@ -1633,7 +1656,57 @@ func (e *egressIPZoneController) getTransitSwitchIP(nodeName string) (string, er
 // to equal [gatewayRouterIP]
 // - if the LogicalRouterPolicy does exist: it adds the gatewayRouterIP to the
 // array of nexthops
-func (e *egressIPZoneController) createReroutePolicyOps(ops []ovsdb.Operation, podIPNets []*net.IPNet, status egressipv1.EgressIPStatusItem, egressIPName string) ([]ovsdb.Operation, error) {
+func (e *egressIPZoneController) createRerouteGatewayPolicyOps(ops []ovsdb.Operation, podIPNets []*net.IPNet, status egressipv1.EgressIPStatusItem, egressIPName string) ([]ovsdb.Operation, error) {
+	isEgressIPv6 := utilnet.IsIPv6String(status.EgressIP)
+	var nextHopIP string
+	var err error
+	isLocalZoneNode, loadedEgressNode := e.nodeZoneState.Load(status.Node)
+	if loadedEgressNode && isLocalZoneNode.(bool) {
+		gatewayRouterIP, err := e.getGatewayRouterJoinIP(status.Node, isEgressIPv6)
+		if err != nil {
+			return nil, fmt.Errorf("unable to retrieve gateway IP for node: %s, protocol is IPv6: %v, err: %w", status.Node, isEgressIPv6, err)
+		}
+		nextHopIP = gatewayRouterIP.String()
+	} else if config.OVNKubernetesFeature.EnableInterconnect {
+		// fetch node annotation of the egress node
+		nextHopIP, err = e.getTransitSwitchIP(status.Node)
+		if err != nil {
+			return nil, fmt.Errorf("unable to fetch transit switch IP for node %s: %v", status.Node, err)
+		}
+	}
+
+	// Handle all pod IPs that match the egress IP address family
+	for _, podIPNet := range util.MatchAllIPNetFamily(isEgressIPv6, podIPNets) {
+		lrp := nbdb.LogicalRouterPolicy{
+			Match:    fmt.Sprintf("%s.src == %s", ipFamilyName(isEgressIPv6), podIPNet.IP.String()),
+			Priority: types.EgressIPReroutePriority,
+			Nexthops: []string{nextHopIP},
+			Action:   nbdb.LogicalRouterPolicyActionReroute,
+			ExternalIDs: map[string]string{
+				"name": egressIPName,
+			},
+		}
+		p := func(item *nbdb.LogicalRouterPolicy) bool {
+			return item.Match == lrp.Match && item.Priority == lrp.Priority && item.ExternalIDs["name"] == lrp.ExternalIDs["name"]
+		}
+
+		ops, err = libovsdbops.CreateOrAddNextHopsToLogicalRouterPolicyWithPredicateOps(e.nbClient, ops, types.OVNClusterRouter, &lrp, p)
+		if err != nil {
+			return nil, fmt.Errorf("error creating logical router policy %+v on router %s: %v", lrp, types.OVNClusterRouter, err)
+		}
+	}
+	return ops, nil
+}
+
+// createRerouteGatewayPolicyOps creates an operation that does idempotent updates of the
+// LogicalRouterPolicy corresponding to the egressIP status item, according to the
+// following update procedure:
+// - if the LogicalRouterPolicy does not exist: it adds it by creating the
+// reference to it from ovn_cluster_router and specifying the array of nexthops
+// to equal [gatewayRouterIP]
+// - if the LogicalRouterPolicy does exist: it adds the gatewayRouterIP to the
+// array of nexthops
+func (e *egressIPZoneController) createRerouteManagementPolicyOps(ops []ovsdb.Operation, podIPNets []*net.IPNet, status egressipv1.EgressIPStatusItem, egressIPName string) ([]ovsdb.Operation, error) {
 	isEgressIPv6 := utilnet.IsIPv6String(status.EgressIP)
 	var nextHopIP string
 	var err error
@@ -1718,17 +1791,13 @@ func (e *egressIPZoneController) deleteReroutePolicyOps(ops []ovsdb.Operation, p
 	return ops, nil
 }
 
-func (e *egressIPZoneController) createStaticRouteOps(ops []ovsdb.Operation, podIPNets []*net.IPNet, status egressipv1.EgressIPStatusItem, egressIPName string) ([]ovsdb.Operation, error) {
-	isEgressIPv6 := utilnet.IsIPv6String(status.EgressIP)
-	gatewayRouterIP, err := e.getGatewayRouterJoinIP(status.Node, isEgressIPv6)
-	if err != nil {
-		return nil, fmt.Errorf("unable to retrieve gateway IP for node: %s, protocol is IPv6: %v, err: %w", status.Node, isEgressIPv6, err)
-	}
+func (e *egressIPZoneController) createStaticRouteOps(ops []ovsdb.Operation, podIPNets []*net.IPNet, status egressipv1.EgressIPStatusItem, egressIPName, nextHopIP string, v6 bool) ([]ovsdb.Operation, error) {
+	var err error
 	// Handle all pod IPs that match the egress IP address family
-	for _, podIPNet := range util.MatchAllIPNetFamily(isEgressIPv6, podIPNets) {
+	for _, podIPNet := range util.MatchAllIPNetFamily(v6, podIPNets) {
 		lrsr := nbdb.LogicalRouterStaticRoute{
 			IPPrefix: podIPNet.IP.String(),
-			Nexthop:  gatewayRouterIP.String(),
+			Nexthop:  nextHopIP,
 			ExternalIDs: map[string]string{
 				"name": egressIPName,
 			},
