@@ -1,4 +1,4 @@
-package node
+package link_manager
 
 import (
 	"fmt"
@@ -16,12 +16,12 @@ import (
 // gather all interfaces data address + mask and offer this as a service
 // offer to take address and assign to interface. Ensure its there.
 
-type linkAddress struct {
-	link      netlink.Link
-	addresses []netlink.Addr
+type LinkAddress struct {
+	Link      netlink.Link
+	Addresses []netlink.Addr
 }
 
-type linkNetworkManager struct {
+type Controller struct {
 	mu          *sync.Mutex
 	name        string
 	ipv4Enabled bool
@@ -29,8 +29,8 @@ type linkNetworkManager struct {
 	store       map[string][]netlink.Addr
 }
 
-func newInterfaceManager(name string, v4, v6 bool) *linkNetworkManager {
-	return &linkNetworkManager{
+func NewController(name string, v4, v6 bool) *Controller {
+	return &Controller{
 		mu:          &sync.Mutex{},
 		name:        name,
 		ipv4Enabled: v4,
@@ -39,7 +39,7 @@ func newInterfaceManager(name string, v4, v6 bool) *linkNetworkManager {
 	}
 }
 
-func (lnm *linkNetworkManager) run(stopCh <-chan struct{}, doneWg *sync.WaitGroup) {
+func (c *Controller) run(stopCh <-chan struct{}, doneWg *sync.WaitGroup) {
 	go func() {
 		defer doneWg.Done()
 		ticker := time.NewTicker(2 * time.Minute)
@@ -50,15 +50,15 @@ func (lnm *linkNetworkManager) run(stopCh <-chan struct{}, doneWg *sync.WaitGrou
 			case <-stopCh:
 				return
 			case <-ticker.C:
-				lnm.mu.Lock()
-				lnm.reconcile()
-				lnm.mu.Unlock()
+				c.mu.Lock()
+				c.reconcile()
+				c.mu.Unlock()
 			}
 		}
 	}()
 }
 
-func (lnm *linkNetworkManager) addAddress(address netlink.Addr) error {
+func (c *Controller) addAddress(address netlink.Addr) error {
 	if address.LinkIndex == 0 {
 		return fmt.Errorf("link index must be non-zero")
 	}
@@ -71,17 +71,17 @@ func (lnm *linkNetworkManager) addAddress(address netlink.Addr) error {
 	if _, err := netlink.LinkByIndex(address.LinkIndex); err != nil {
 		return fmt.Errorf("no valid link associated with addresses %s: %v", address.String(), err)
 	}
-	lnm.mu.Lock()
-	defer lnm.mu.Unlock()
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	// overwrite label to the name of this component in-order to aid address ownership
-	address.Label = lnm.name
-	if err := lnm.addAddressToStore(address); err != nil {
+	address.Label = c.name
+	if err := c.addAddressToStore(address); err != nil {
 		return fmt.Errorf("failed to add address %q: %v", address.String(), err)
 	}
 	return nil
 }
 
-func (lnm *linkNetworkManager) reconcile() {
+func (c *Controller) reconcile() {
 	// 1. get all the links on the node
 	// 2. iterate over the links and get the addresses associated with it
 	// 3. cleanup any stale addresses from link that we no longer managed
@@ -94,17 +94,17 @@ func (lnm *linkNetworkManager) reconcile() {
 	}
 	for _, link := range links {
 		// get all addresses associated with the link depending on which IP families we support
-		addressesFound, err := lnm.getLinkAddressesByIPFamily(link)
+		addressesFound, err := c.getLinkAddressesByIPFamily(link)
 		if err != nil {
 			klog.Errorf("Link Network Manager: failed to get address from link %q", link.Attrs().Name)
 			continue
 		}
-		addressesWanted, found := lnm.store[link.Attrs().Name]
+		addressesWanted, found := c.store[link.Attrs().Name]
 		if !found {
 			// we dont managed this link, check we  used to manage it and if a stale address is present, delete it
 			for _, address := range addressesFound {
 				// we label any address we create, so if we aren't managed a link, we must remove any stale addresses
-				if address.Label == lnm.name {
+				if address.Label == c.name {
 					if err := netlink.AddrDel(link, &address); err != nil {
 						klog.Errorf("Link Network Manager: failed to delete address %q from link %q",
 							address.String(), link.Attrs().Name)
@@ -120,7 +120,7 @@ func (lnm *linkNetworkManager) reconcile() {
 		for _, addrFound := range addressesFound {
 			if !containsAddress(addressesWanted, addrFound) {
 				// every address we added is labeled with a well-known label to ensure we clean any addresses we previously managed.
-				if addrFound.Label == lnm.name {
+				if addrFound.Label == c.name {
 					// delete an unmanaged address that we used to managed
 					if err = netlink.AddrDel(link, &addrFound); err != nil {
 						klog.Errorf("Link Network Manager: failed to delete stale address %q from link %q: %v",
@@ -157,16 +157,16 @@ func containsAddress(addresses []netlink.Addr, candidate netlink.Addr) bool {
 	return false
 }
 
-func (lnm *linkNetworkManager) getLinkAddressesByIPFamily(link netlink.Link) ([]netlink.Addr, error) {
+func (c *Controller) getLinkAddressesByIPFamily(link netlink.Link) ([]netlink.Addr, error) {
 	links := make([]netlink.Addr, 0)
-	if lnm.ipv4Enabled {
+	if c.ipv4Enabled {
 		linksFound, err := netlink.AddrList(link, netlink.FAMILY_V4)
 		if err != nil {
 			return links, fmt.Errorf("failed to list link addresses: %v", err)
 		}
 		links = linksFound
 	}
-	if lnm.ipv6Enabled {
+	if c.ipv6Enabled {
 		linksFound, err := netlink.AddrList(link, netlink.FAMILY_V6)
 		if err != nil {
 			return links, fmt.Errorf("failed to list link addresses: %v", err)
@@ -176,14 +176,14 @@ func (lnm *linkNetworkManager) getLinkAddressesByIPFamily(link netlink.Link) ([]
 	return links, nil
 }
 
-func (lnm *linkNetworkManager) addAddressToStore(newAddress netlink.Addr) error {
+func (c *Controller) addAddressToStore(newAddress netlink.Addr) error {
 	link, err := netlink.LinkByIndex(newAddress.LinkIndex)
 	if err != nil {
 		return fmt.Errorf("failed to find link by index: %v", err)
 	}
-	addressesSaved, found := lnm.store[link.Attrs().Name]
+	addressesSaved, found := c.store[link.Attrs().Name]
 	if !found {
-		lnm.store[link.Attrs().Name] = []netlink.Addr{newAddress}
+		c.store[link.Attrs().Name] = []netlink.Addr{newAddress}
 		return nil
 	}
 	// check if the address already exists
@@ -196,7 +196,7 @@ func (lnm *linkNetworkManager) addAddressToStore(newAddress netlink.Addr) error 
 	}
 	// add it to store if not found
 	if !found {
-		lnm.store[link.Attrs().Name] = append(addressesSaved, newAddress)
+		c.store[link.Attrs().Name] = append(addressesSaved, newAddress)
 	}
 	return nil
 }

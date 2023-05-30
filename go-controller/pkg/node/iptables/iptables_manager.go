@@ -1,4 +1,4 @@
-package node
+package interface_manager
 
 import (
 	"fmt"
@@ -12,28 +12,28 @@ import (
 	kexec "k8s.io/utils/exec"
 )
 
-type chain struct {
-	table  iptables.Table
-	chain  iptables.Chain
-	proto  iptables.Protocol
+type Chain struct {
+	Table  iptables.Table
+	Chain  iptables.Chain
+	Proto  iptables.Protocol
 	delete bool
 }
 
-func (c chain) equal(c2 chain) bool {
-	if c.table != c2.table {
+func (c Chain) equal(c2 Chain) bool {
+	if c.Table != c2.Table {
 		return false
 	}
-	if c.chain != c2.chain {
+	if c.Chain != c2.Chain {
 		return false
 	}
-	if c.proto != c2.proto {
+	if c.Proto != c2.Proto {
 		return false
 	}
 	return true
 }
 
-// rule represents an iptables entry
-type rule struct {
+// Rule represents an iptables entry
+type Rule struct {
 	table  iptables.Table
 	chain  iptables.Chain
 	proto  iptables.Protocol
@@ -41,7 +41,7 @@ type rule struct {
 	delete bool
 }
 
-func (r rule) equal(r2 rule) bool {
+func (r Rule) equal(r2 Rule) bool {
 	if r.table != r2.table {
 		return false
 	}
@@ -83,21 +83,21 @@ func (r rule) equal(r2 rule) bool {
 	return true
 }
 
-// iptablesManager manages iptables for clients
-type iptablesManager struct {
+// Controller manages iptables for clients
+type Controller struct {
 	mu     *sync.Mutex
-	chains []chain
-	rules  []rule
+	chains []Chain
+	rules  []Rule
 	iptV4  iptables.Interface
 	iptV6  iptables.Interface
 	v4     bool
 	v6     bool
 }
 
-func newIPTablesManager(v4, v6 bool) *iptablesManager {
-	return &iptablesManager{
-		chains: make([]chain, 0),
-		rules:  make([]rule, 0),
+func NewController(v4, v6 bool) *Controller {
+	return &Controller{
+		chains: make([]Chain, 0),
+		rules:  make([]Rule, 0),
 		mu:     &sync.Mutex{},
 		iptV4:  iptables.New(kexec.New(), iptables.ProtocolIPv4),
 		iptV6:  iptables.New(kexec.New(), iptables.ProtocolIPv6),
@@ -106,7 +106,7 @@ func newIPTablesManager(v4, v6 bool) *iptablesManager {
 	}
 }
 
-func (iptm *iptablesManager) run(stopCh chan struct{}, wait sync.WaitGroup) {
+func (c *Controller) Run(stopCh <-chan struct{}, wait *sync.WaitGroup) {
 	go func() {
 		defer wait.Done()
 		ticker := time.NewTicker(5 * time.Minute)
@@ -116,11 +116,11 @@ func (iptm *iptablesManager) run(stopCh chan struct{}, wait sync.WaitGroup) {
 			case <-stopCh:
 				return
 			case <-ticker.C:
-				iptm.mu.Lock()
-				if err := iptm.reconcile(); err != nil {
+				c.mu.Lock()
+				if err := c.reconcile(); err != nil {
 					klog.Errorf("IP tables manager: failed to reconcile: %v", err)
 				}
-				iptm.mu.Unlock()
+				c.mu.Unlock()
 			}
 		}
 	}()
@@ -128,20 +128,20 @@ func (iptm *iptablesManager) run(stopCh chan struct{}, wait sync.WaitGroup) {
 
 // reconcile configures IP tables to make the state in rules. CPU starvation or iptables lock held by an external
 // entity may cause this function to take some time to execute.
-func (iptm *iptablesManager) reconcile() error {
+func (c *Controller) reconcile() error {
 	start := time.Now()
 	defer func() {
 		klog.V(4).Infof("reconciling IP tables rules took %v", time.Since(start))
 	}()
 	var errors []error
-	tempChains := iptm.chains[:0]
-	for _, c := range iptm.chains {
-		if c.delete {
+	tempChains := c.chains[:0]
+	for _, chain := range c.chains {
+		if chain.delete {
 			if err := execIPTablesWithRetry(func() error {
-				if c.proto == iptables.ProtocolIPv4 {
-					return iptm.iptV4.DeleteChain(c.table, c.chain)
+				if chain.Proto == iptables.ProtocolIPv4 {
+					return c.iptV4.DeleteChain(chain.Table, chain.Chain)
 				} else {
-					return iptm.iptV6.DeleteChain(c.table, c.chain)
+					return c.iptV6.DeleteChain(chain.Table, chain.Chain)
 				}
 			}); err != nil {
 				return fmt.Errorf("failed to delete chain %v: %v", c, err)
@@ -151,10 +151,10 @@ func (iptm *iptablesManager) reconcile() error {
 			tempChains = append(tempChains, c)
 			err := execIPTablesWithRetry(func() error {
 				var err error
-				if c.proto == iptables.ProtocolIPv4 {
-					_, err = iptm.iptV4.EnsureChain(c.table, c.chain)
-				} else if c.proto == iptables.ProtocolIPv6 {
-					_, err = iptm.iptV6.EnsureChain(c.table, c.chain)
+				if chain.Proto == iptables.ProtocolIPv4 {
+					_, err = c.iptV4.EnsureChain(chain.Table, chain.Chain)
+				} else if chain.Proto == iptables.ProtocolIPv6 {
+					_, err = c.iptV6.EnsureChain(chain.Table, chain.Chain)
 				}
 				return err
 			})
@@ -163,18 +163,18 @@ func (iptm *iptablesManager) reconcile() error {
 			}
 		}
 	}
-	iptm.chains = tempChains
+	c.chains = tempChains
 	// in-order to avoid creating a new underlying array, use the existing one. We can copy rules we want to persist here
 	// and ignore rules we want to delete
-	tempRules := iptm.rules[:0]
-	for _, r := range iptm.rules {
+	tempRules := c.rules[:0]
+	for _, r := range c.rules {
 		// cleanup rules that are marked for deletion
 		if r.delete {
 			if err := execIPTablesWithRetry(func() error {
 				if r.proto == iptables.ProtocolIPv4 {
-					return iptm.iptV4.DeleteRule(r.table, r.chain, r.args...)
+					return c.iptV4.DeleteRule(r.table, r.chain, r.args...)
 				} else {
-					return iptm.iptV6.DeleteRule(r.table, r.chain, r.args...)
+					return c.iptV6.DeleteRule(r.table, r.chain, r.args...)
 				}
 			}); err != nil {
 				return fmt.Errorf("failed to delete rule: %v", err)
@@ -185,9 +185,9 @@ func (iptm *iptablesManager) reconcile() error {
 			err := execIPTablesWithRetry(func() error {
 				var err error
 				if r.proto == iptables.ProtocolIPv4 {
-					_, err = iptm.iptV4.EnsureRule(iptables.Append, r.table, r.chain, r.args...)
+					_, err = c.iptV4.EnsureRule(iptables.Append, r.table, r.chain, r.args...)
 				} else if r.proto == iptables.ProtocolIPv6 {
-					_, err = iptm.iptV6.EnsureRule(iptables.Append, r.table, r.chain, r.args...)
+					_, err = c.iptV6.EnsureRule(iptables.Append, r.table, r.chain, r.args...)
 				}
 				return err
 			})
@@ -196,67 +196,67 @@ func (iptm *iptablesManager) reconcile() error {
 			}
 		}
 	}
-	iptm.rules = tempRules
+	c.rules = tempRules
 	return utilerrors.NewAggregate(errors)
 }
 
-func (iptm *iptablesManager) ensureChain(table iptables.Table, c iptables.Chain, proto iptables.Protocol) error {
-	iptm.mu.Lock()
-	defer iptm.mu.Unlock()
+func (c *Controller) ensureChain(table iptables.Table, chain iptables.Chain, proto iptables.Protocol) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 
-	newChain := chain{
-		table: table,
-		chain: c,
-		proto: proto,
+	newChain := Chain{
+		Table: table,
+		Chain: chain,
+		Proto: proto,
 	}
 	// do nothing if it already exists
-	for _, existingChain := range iptm.chains {
+	for _, existingChain := range c.chains {
 		if existingChain.equal(newChain) {
 			return nil
 		}
 	}
-	iptm.chains = append(iptm.chains, newChain)
-	return iptm.reconcile()
+	c.chains = append(c.chains, newChain)
+	return c.reconcile()
 }
 
-func (iptm *iptablesManager) ensureRule(table iptables.Table, c iptables.Chain, proto iptables.Protocol, args ...string) error {
-	iptm.mu.Lock()
-	defer iptm.mu.Unlock()
-	newRule := rule{
+func (c *Controller) ensureRule(table iptables.Table, chain iptables.Chain, proto iptables.Protocol, args ...string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	newRule := Rule{
 		table: table,
-		chain: c,
+		chain: chain,
 		proto: proto,
 		args:  args,
 	}
 	// do nothing if it already exists
-	for _, existingRule := range iptm.rules {
+	for _, existingRule := range c.rules {
 		if existingRule.equal(newRule) {
 			return nil
 		}
 	}
-	iptm.rules = append(iptm.rules)
-	return iptm.reconcile()
+	c.rules = append(c.rules)
+	return c.reconcile()
 }
 
-func (iptm *iptablesManager) deleteRule(table iptables.Table, chain iptables.Chain, proto iptables.Protocol, args ...string) error {
-	iptm.mu.Lock()
-	defer iptm.mu.Unlock()
-	deleteRule := rule{
+func (c *Controller) deleteRule(table iptables.Table, chain iptables.Chain, proto iptables.Protocol, args ...string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	deleteRule := Rule{
 		table: table,
 		chain: chain,
 		proto: proto,
 		args:  args,
 	}
 	var reconcileNeeded bool
-	for i, existingRule := range iptm.rules {
+	for i, existingRule := range c.rules {
 		if existingRule.equal(deleteRule) {
-			iptm.rules[i].delete = true
+			c.rules[i].delete = true
 			reconcileNeeded = true
 			break
 		}
 	}
 	if reconcileNeeded {
-		return iptm.reconcile()
+		return c.reconcile()
 	}
 	return nil
 }

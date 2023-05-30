@@ -1,4 +1,4 @@
-package node
+package rulemanager
 
 import (
 	"github.com/vishvananda/netlink"
