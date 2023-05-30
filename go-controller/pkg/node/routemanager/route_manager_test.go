@@ -1,4 +1,4 @@
-package route_manager
+package routemanager
 
 import (
 	"net"
@@ -233,7 +233,7 @@ func doesRouteEntryExist(targetNs ns.NetNS, link netlink.Link, reCandidate Route
 			return false
 		}
 		r := routeFound.Routes[0] // always only one RE
-		if r.equal(reCandidate) {
+		if r.Equal(reCandidate) {
 			return true
 		}
 	}

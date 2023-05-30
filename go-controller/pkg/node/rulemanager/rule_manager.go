@@ -13,15 +13,15 @@ type nlRule struct {
 	delete bool
 }
 
-type ruleManager struct {
+type Controller struct {
 	mu    *sync.Mutex
 	rules []nlRule
 	v4    bool
 	v6    bool
 }
 
-func newRuleManager(v4, v6 bool) ruleManager {
-	return ruleManager{
+func NewController(v4, v6 bool) *Controller {
+	return &Controller{
 		mu:    &sync.Mutex{},
 		rules: make([]nlRule, 0),
 		v4:    v4,
@@ -29,7 +29,7 @@ func newRuleManager(v4, v6 bool) ruleManager {
 	}
 }
 
-func (rm *ruleManager) run(stopCh chan struct{}, wait sync.WaitGroup) {
+func (rm *Controller) Run(stopCh <-chan struct{}, wait *sync.WaitGroup) {
 	go func() {
 		defer wait.Done()
 		ticker := time.NewTicker(4 * time.Minute)
@@ -48,14 +48,14 @@ func (rm *ruleManager) run(stopCh chan struct{}, wait sync.WaitGroup) {
 	}()
 }
 
-func (rm *ruleManager) addRule(rule *netlink.Rule) error {
+func (rm *Controller) AddRule(rule *netlink.Rule) error {
 	rm.mu.Lock()
 	defer rm.mu.Unlock()
 	rm.rules = append(rm.rules, nlRule{rule: rule})
 	return rm.reconcile()
 }
 
-func (rm *ruleManager) deleteRule(rule *netlink.Rule) error {
+func (rm *Controller) DeleteRule(rule *netlink.Rule) error {
 	rm.mu.Lock()
 	defer rm.mu.Unlock()
 	var reconcileNeeded bool
@@ -72,7 +72,7 @@ func (rm *ruleManager) deleteRule(rule *netlink.Rule) error {
 	return nil
 }
 
-func (rm *ruleManager) reconcile() error {
+func (rm *Controller) reconcile() error {
 	start := time.Now()
 	defer func() {
 		klog.V(4).Infof("reconciling rules took %v", time.Since(start))

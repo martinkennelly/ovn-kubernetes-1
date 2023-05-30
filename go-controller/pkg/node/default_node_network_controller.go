@@ -14,13 +14,13 @@ import (
 	kapi "k8s.io/api/core/v1"
 	discovery "k8s.io/api/discovery/v1"
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
+	apierrors "k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/apimachinery/pkg/util/wait"
 	clientset "k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/klog/v2"
 	utilnet "k8s.io/utils/net"
 
-	"github.com/containernetworking/plugins/pkg/ip"
 	honode "github.com/ovn-org/ovn-kubernetes/go-controller/hybrid-overlay/pkg/controller"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/cni"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/config"
@@ -28,17 +28,20 @@ import (
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/factory"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/informer"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/kube"
+	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/node/controllers/egressip"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/node/controllers/egressservice"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/node/controllers/upgrade"
 	nodeipt "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/node/iptables"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/node/ovspinning"
+	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/node/routemanager"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/ovn/controller/apbroute"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/ovn/healthcheck"
-	retry "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/retry"
+	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/retry"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/types"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
+
+	"github.com/containernetworking/plugins/pkg/ip"
 	"github.com/vishvananda/netlink"
-	apierrors "k8s.io/apimachinery/pkg/util/errors"
 )
 
 type CommonNodeNetworkControllerInfo struct {
@@ -93,11 +96,9 @@ type DefaultNodeNetworkController struct {
 	BaseNodeNetworkController
 
 	gateway Gateway
-
 	// Node healthcheck server for cloud load balancers
 	healthzServer *proxierHealthUpdater
-	routeManager  *routeManager
-	linkManager   *linkNetworkManager
+	routeManager  *routemanager.Controller
 
 	// retry framework for namespaces, used for the removal of stale conntrack entries for external gateways
 	retryNamespaces *retry.RetryFramework
@@ -117,8 +118,7 @@ func newDefaultNodeNetworkController(cnnci *CommonNodeNetworkControllerInfo, sto
 			stopChan:                        stopChan,
 			wg:                              wg,
 		},
-		routeManager: newRouteManager(wg, true, 2*time.Minute),
-		linkManager:  newInterfaceManager("default-network-controller", config.IPv6Mode, config.IPv4Mode),
+		routeManager: routemanager.NewController(wg, true, 2*time.Minute),
 	}
 }
 
@@ -569,7 +569,7 @@ func getMgmtPortAndRepName(node *kapi.Node) (string, string, error) {
 }
 
 func createNodeManagementPorts(node *kapi.Node, nodeAnnotator kube.Annotator, waiter *startupWaiter,
-	subnets []*net.IPNet, routeManager *routeManager) ([]managementPortEntry, *managementPortConfig, error) {
+	subnets []*net.IPNet, routeManager *routemanager.Controller) ([]managementPortEntry, *managementPortConfig, error) {
 	netdevName, rep, err := getMgmtPortAndRepName(node)
 	if err != nil {
 		return nil, nil, err
@@ -632,11 +632,7 @@ func (nc *DefaultNodeNetworkController) Start(ctx context.Context) error {
 	if err := level.Set("5"); err != nil {
 		klog.Errorf("Setting klog \"loglevel\" to 5 failed, err: %v", err)
 	}
-	go nc.routeManager.run(ctx.Done())
-	if config.OVNKubernetesFeature.EnableEgressIP {
-		nc.wg.Add(1)
-		nc.linkManager.run(ctx.Done(), nc.wg)
-	}
+	go nc.routeManager.Run(ctx.Done())
 
 	if node, err = nc.Kube.GetNode(nc.name); err != nil {
 		return fmt.Errorf("error retrieving node %s: %v", nc.name, err)
@@ -809,7 +805,7 @@ func (nc *DefaultNodeNetworkController) Start(ctx context.Context) error {
 						return fmt.Errorf("unable to get link for %s, error: %v", types.K8sMgmtIntfName, err)
 					}
 					var gwIP net.IP
-					var routes []route
+					var routes []routemanager.Route
 					for _, subnet := range config.Kubernetes.ServiceCIDRs {
 						if utilnet.IsIPv4CIDR(subnet) {
 							gwIP = mgmtPortConfig.ipv4.gwIP
@@ -817,14 +813,14 @@ func (nc *DefaultNodeNetworkController) Start(ctx context.Context) error {
 							gwIP = mgmtPortConfig.ipv6.gwIP
 						}
 						subnet := *subnet
-						routes = append(routes, route{
-							gwIP:   gwIP,
-							subnet: &subnet,
-							mtu:    config.Default.RoutableMTU,
-							srcIP:  nil,
+						routes = append(routes, routemanager.Route{
+							GwIP:   gwIP,
+							Subnet: &subnet,
+							MTU:    config.Default.RoutableMTU,
+							SrcIP:  nil,
 						})
 					}
-					nc.routeManager.add(routesPerLink{link, routes})
+					nc.routeManager.Add(routemanager.RoutesPerLink{Link: link, Routes: routes})
 				}
 			}
 		}
@@ -941,6 +937,18 @@ func (nc *DefaultNodeNetworkController) Start(ctx context.Context) error {
 			c.Run(1)
 		}()
 	}
+
+	if config.OVNKubernetesFeature.EnableEgressIP {
+		c, err := egressip.NewController(nc.watchFactory.EgressIPInformer(), nc.watchFactory.NodeInformer(),
+			nc.watchFactory.NamespaceInformer(), nc.watchFactory.PodCoreInformer(), nc.routeManager, config.IPv4Mode,
+			config.IPv6Mode, nc.name)
+		if err != nil {
+			return fmt.Errorf("failed to create egress IP controller: %v", err)
+		}
+		nc.wg.Add(1)
+		c.Run(nc.stopChan, nc.wg)
+	}
+
 	nc.wg.Add(1)
 	go func() {
 		defer nc.wg.Done()
@@ -1188,11 +1196,11 @@ func (nc *DefaultNodeNetworkController) validateVTEPInterfaceMTU() error {
 	return nil
 }
 
-func configureSvcRouteViaBridge(routeManager *routeManager, bridge string) error {
+func configureSvcRouteViaBridge(routeManager *routemanager.Controller, bridge string) error {
 	return configureSvcRouteViaInterface(routeManager, bridge, DummyNextHopIPs())
 }
 
-func upgradeServiceRoute(routeManager *routeManager, bridgeName string) error {
+func upgradeServiceRoute(routeManager *routemanager.Controller, bridgeName string) error {
 	klog.Info("Updating K8S Service route")
 	// Flush old routes
 	link, err := util.LinkSetUp(types.K8sMgmtIntfName)
@@ -1201,7 +1209,7 @@ func upgradeServiceRoute(routeManager *routeManager, bridgeName string) error {
 	}
 	for _, serviceCIDR := range config.Kubernetes.ServiceCIDRs {
 		serviceCIDR := *serviceCIDR
-		routeManager.add(routesPerLink{link, []route{{subnet: &serviceCIDR}}})
+		routeManager.Add(routemanager.RoutesPerLink{Link: link, Routes: []routemanager.Route{{Subnet: &serviceCIDR}}})
 	}
 
 	// add route via OVS bridge

@@ -1,4 +1,4 @@
-package route_manager
+package routemanager
 
 import (
 	"fmt"
@@ -172,7 +172,7 @@ func (c *Controller) processNetlinkEvent(ru netlink.RouteUpdate) error {
 	var syncReason string
 	for _, managedRoute := range rl.Routes {
 		for _, routeEvent := range rlEvent.Routes {
-			if managedRoute.equal(routeEvent) {
+			if managedRoute.Equal(routeEvent) {
 				syncNeeded = true
 				syncReason = fmt.Sprintf("managed route was modified: %s", managedRoute.string())
 			}
@@ -189,7 +189,7 @@ func (c *Controller) processNetlinkEvent(ru netlink.RouteUpdate) error {
 
 func (c *Controller) applyRoutesPerLink(rl RoutesPerLink) error {
 	for _, r := range rl.Routes {
-		if err := c.applyRoute(rl.Link, r.GWIP, r.Subnet, r.MTU, r.SRCIP, rl.Table); err != nil {
+		if err := c.applyRoute(rl.Link, r.GwIP, r.Subnet, r.MTU, r.SrcIP, rl.Table); err != nil {
 			return fmt.Errorf("failed to apply route (%s) because of error: %v", r.string(), err)
 		}
 	}
@@ -242,7 +242,8 @@ func (c *Controller) netlinkAddRoute(link netlink.Link, gwIP net.IP, subnet *net
 
 func (c *Controller) netlinkDelRoute(link netlink.Link, subnet *net.IPNet, table int) error {
 	// List routes for the link in the default routing table
-	nlRoutes, err := netlink.RouteList(link, netlink.FAMILY_ALL)
+	filter, mask := filterRouteByTable(link, table)
+	nlRoutes, err := netlink.RouteListFiltered(netlink.FAMILY_ALL, filter, mask)
 	if err != nil {
 		return fmt.Errorf("failed to get routes for link %s: %v", link.Attrs().Name, err)
 	}
@@ -258,12 +259,12 @@ func (c *Controller) netlinkDelRoute(link netlink.Link, subnet *net.IPNet, table
 		if deleteRoute {
 			err = netlink.RouteDel(&nlRoute)
 			if err != nil {
-				net := "default"
+				dstValue := "default"
 				if nlRoute.Dst != nil {
-					net = nlRoute.Dst.String()
+					dstValue = nlRoute.Dst.String()
 				}
 				return fmt.Errorf("failed to delete route '%s via %s' for link %s : %v\n",
-					net, nlRoute.Gw.String(), link.Attrs().Name, err)
+					dstValue, nlRoute.Gw.String(), link.Attrs().Name, err)
 			}
 			break
 		}
@@ -285,7 +286,7 @@ func (c *Controller) addRoutesPerLinkStore(rl RoutesPerLink) error {
 	for _, newRoute := range rl.Routes {
 		var found bool
 		for _, managedRoute := range managedRl.Routes {
-			if managedRoute.equal(newRoute) {
+			if managedRoute.Equal(newRoute) {
 				found = true
 				break
 			}
@@ -329,7 +330,7 @@ func (c *Controller) sync() {
 		for _, expectedRoute := range rl.Routes {
 			var found bool
 			for _, activeRoute := range activeRoutes {
-				if activeRoute.equal(expectedRoute) {
+				if activeRoute.Equal(expectedRoute) {
 					found = true
 				}
 			}
@@ -396,7 +397,7 @@ func (rl *RoutesPerLink) delRoutes(delRoutes []Route) {
 	for _, existingRoute := range rl.Routes {
 		var found bool
 		for _, delRoute := range delRoutes {
-			if existingRoute.equal(delRoute) {
+			if existingRoute.Equal(delRoute) {
 				found = true
 			}
 		}
@@ -408,23 +409,23 @@ func (rl *RoutesPerLink) delRoutes(delRoutes []Route) {
 }
 
 type Route struct {
-	GWIP   net.IP
+	GwIP   net.IP
 	Subnet *net.IPNet
 	MTU    int
-	SRCIP  net.IP
+	SrcIP  net.IP
 }
 
-func (r Route) equal(r2 Route) bool {
+func (r Route) Equal(r2 Route) bool {
 	if r.MTU != r2.MTU {
 		return false
 	}
 	if r.Subnet.String() != r2.Subnet.String() {
 		return false
 	}
-	if r.GWIP.String() != r2.GWIP.String() {
+	if r.GwIP.String() != r2.GwIP.String() {
 		return false
 	}
-	if r.SRCIP.String() != r2.SRCIP.String() {
+	if r.SrcIP.String() != r2.SrcIP.String() {
 		return false
 	}
 	return true
@@ -438,13 +439,22 @@ func (r Route) string() string {
 	if r.MTU != 0 {
 		s = fmt.Sprintf("%s MTU: %d ", s, r.MTU)
 	}
-	if len(r.SRCIP) > 0 {
-		s = fmt.Sprintf("%s Source IP: %q ", s, r.SRCIP.String())
+	if len(r.SrcIP) > 0 {
+		s = fmt.Sprintf("%s Source IP: %q ", s, r.SrcIP.String())
 	}
-	if len(r.GWIP) > 0 {
-		s = fmt.Sprintf("%s Gateway IP: %q", s, r.GWIP.String())
+	if len(r.GwIP) > 0 {
+		s = fmt.Sprintf("%s Gateway IP: %q", s, r.GwIP.String())
 	}
 	return s
+}
+
+func ConvertNetlinkRouteToRoute(nlRoute netlink.Route) Route {
+	return Route{
+		GwIP:   nlRoute.Gw,
+		Subnet: nlRoute.Dst,
+		MTU:    nlRoute.MTU,
+		SrcIP:  nlRoute.Src,
+	}
 }
 
 func convertRouteUpdateToRoutesPerLink(ru netlink.RouteUpdate) (RoutesPerLink, error) {
@@ -458,10 +468,10 @@ func convertRouteUpdateToRoutesPerLink(ru netlink.RouteUpdate) (RoutesPerLink, e
 		Table: ru.Table,
 		Routes: []Route{
 			{
-				GWIP:   ru.Gw,
+				GwIP:   ru.Gw,
 				Subnet: ru.Dst,
 				MTU:    ru.MTU,
-				SRCIP:  ru.Src,
+				SrcIP:  ru.Src,
 			},
 		},
 	}, nil
@@ -478,10 +488,10 @@ func convertNetlinkRouteToRoutesPerLink(nlRoute netlink.Route) (RoutesPerLink, e
 		Table: nlRoute.Table,
 		Routes: []Route{
 			{
-				GWIP:   nlRoute.Gw,
+				GwIP:   nlRoute.Gw,
 				Subnet: nlRoute.Dst,
 				MTU:    nlRoute.MTU,
-				SRCIP:  nlRoute.Src,
+				SrcIP:  nlRoute.Src,
 			},
 		},
 	}, nil

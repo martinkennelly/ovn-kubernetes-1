@@ -1089,10 +1089,17 @@ func (eIPC *egressIPClusterController) assignEgressIPs(name string, egressIPs []
 			// we'll end up here. This is not an error. What would be an error
 			// is if the user created EIP1 with IP1 and a second EIP2 with IP1
 			if name == status.Name {
+				node, err := eIPC.watchFactory.GetNode(status.Node)
+				if err != nil {
+					klog.Errorf("Failed to process existing egress IP %s allocation because node %s doesn't exist: %v",
+						egressIP, status.Node, err)
+					continue
+				}
 				// IP is already assigned for this EgressIP object
 				assignments = append(assignments, egressipv1.EgressIPStatusItem{
-					Node:     status.Node,
-					EgressIP: eIP.String(),
+					Node:         status.Node,
+					EgressIP:     eIP.String(),
+					RouteViaHost: util.IsSecondaryNetworkContainingIP(node, eIP),
 				})
 				continue
 			} else {
@@ -1134,7 +1141,11 @@ func (eIPC *egressIPClusterController) assignEgressIPs(name string, egressIPs []
 
 		assignableNodesWithSecondaryNet := make([]*egressNode, 0)
 		for _, eNode := range assignableNodes {
-			if ok := eIPC.isSecondaryNetworkAssignable(eNode.name, eIP); ok {
+			node, err := eIPC.watchFactory.GetNode(eNode.name)
+			if err != nil {
+				continue
+			}
+			if ok := util.IsSecondaryNetworkContainingIP(node, eIP); ok {
 				assignableNodesWithSecondaryNet = append(assignableNodesWithSecondaryNet, eNode)
 			}
 		}
@@ -1168,11 +1179,18 @@ func (eIPC *egressIPClusterController) assignEgressIPs(name string, egressIPs []
 					continue
 				}
 			}
+			node, err := eIPC.watchFactory.GetNode(eNode.name)
+			if err != nil {
+				klog.Errorf("Failed to consider node %s because lookup of kubernetes object failed: %v", eNode.name, err)
+				continue
+			}
+
 			if (eNode.egressIPConfig.V6.Net != nil && eNode.egressIPConfig.V6.Net.Contains(eIP)) ||
 				(eNode.egressIPConfig.V4.Net != nil && eNode.egressIPConfig.V4.Net.Contains(eIP)) {
 				assignments = append(assignments, egressipv1.EgressIPStatusItem{
-					Node:     eNode.name,
-					EgressIP: eIP.String(),
+					Node:         eNode.name,
+					EgressIP:     eIP.String(),
+					RouteViaHost: util.IsSecondaryNetworkContainingIP(node, eIP),
 				})
 				klog.Infof("Successful assignment of egress IP: %s on node: %+v", egressIP, eNode)
 				eNode.allocations[eIP.String()] = name
@@ -1228,7 +1246,7 @@ func (eIPC *egressIPClusterController) validateEgressIPSpec(name string, egressI
 	return validatedEgressIPs, nil
 }
 
-func (eIPC *egressIPController) isEgressIPAddrConflict(egressIP net.IP) (bool, error) {
+func (eIPC *egressIPClusterController) isEgressIPAddrConflict(egressIP net.IP) (bool, error) {
 	nodes, err := eIPC.watchFactory.GetNodes()
 	if err != nil {
 		return false, fmt.Errorf("failed to get nodes: %v", err)
@@ -1247,100 +1265,6 @@ func (eIPC *egressIPController) isEgressIPAddrConflict(egressIP net.IP) (bool, e
 			if ip.Equal(egressIP) {
 				return true, nil
 			}
-		}
-	}
-	return false, nil
-}
-
-func (eIPC *egressIPController) isEgressIPWithinAnyNetwork(egressIP net.IP) (bool, error) {
-	nodes, err := eIPC.watchFactory.GetNodes()
-	if err != nil {
-		return false, fmt.Errorf("failed to get nodes: %v", err)
-	}
-	for _, node := range nodes {
-		if ok, err := eIPC.isEgressIPWithinNetworkNode(node.Name, egressIP); err != nil {
-			return false, err
-		} else if ok {
-			return true, nil
-		}
-	}
-	return false, nil
-}
-
-func (eIPC *egressIPController) isSecondaryNetworkAssignable(nodeName string, egressIP net.IP) bool {
-	networkName, _ := eIPC.getSecondaryNetwork(nodeName, egressIP)
-	if networkName == "" {
-		return false
-	}
-	return true
-}
-
-func (eIPC *egressIPController) getSecondaryNetwork(nodeName string, egressIP net.IP) (string, error) {
-	node, err := eIPC.watchFactory.GetNode(nodeName)
-	if err != nil {
-		return "", err
-	}
-	v6 := utilnet.IsIPv6(egressIP)
-	nodeHostAddresses, err := util.ParseNodeHostAddressesList(node)
-	if err != nil {
-		return "", fmt.Errorf("failed to parse node host addresses for node %q: %v", nodeName, err)
-	}
-	primaryNetwork, err := util.ParseNodePrimaryIfAddr(node)
-	nodeHostAddressFiltered := make([]string, 0)
-	for _, nodeHostAddress := range nodeHostAddresses {
-		nodeHostAddrIP, nodeHostAddrNet, err := net.ParseCIDR(nodeHostAddress)
-		if err != nil {
-			klog.Errorf("Failed to parse a network (%q) on node %q: %v", nodeHostAddress, nodeName, err)
-			continue
-		}
-		if v6 {
-			if !utilnet.IsIPv6(nodeHostAddrIP) {
-				continue
-			}
-			// exclude any primary network addresses from the list
-			if primaryNetwork.V6.Net != nil && primaryNetwork.V6.Net.Network() == nodeHostAddrNet.Network() {
-				continue
-			}
-			// save the network if egress IP is within the network subnet
-			if nodeHostAddrNet != nil && nodeHostAddrNet.Contains(egressIP) {
-				nodeHostAddressFiltered = append(nodeHostAddressFiltered, nodeHostAddress)
-			}
-		} else {
-			if !utilnet.IsIPv4(nodeHostAddrIP) {
-				continue
-			}
-			if nodeHostAddrNet != nil && nodeHostAddrNet.Contains(egressIP) {
-				nodeHostAddressFiltered = append(nodeHostAddressFiltered, nodeHostAddress)
-			}
-		}
-	}
-	if len(nodeHostAddressFiltered) == 0 {
-		return "", fmt.Errorf("no network found to host egres IP %s", egressIP.String())
-	}
-	if len(nodeHostAddressFiltered) != 1 {
-		return "", fmt.Errorf("unexpected number of networks found when trying to find a network to host egress "+
-			"IP %s: %v", egressIP.String(), nodeHostAddressFiltered)
-	}
-	return nodeHostAddressFiltered[0], nil
-}
-
-func (eIPC *egressIPController) isEgressIPWithinNetworkNode(nodeName string, egressIP net.IP) (bool, error) {
-	node, err := eIPC.watchFactory.GetNode(nodeName)
-	if err != nil {
-		return false, err
-	}
-	nodeHostAddressesSet, err := util.ParseNodeHostAddresses(node)
-	if err != nil {
-		return false, fmt.Errorf("failed to parse node host addresses")
-	}
-	for _, nodeHostAddressT := range nodeHostAddressesSet.UnsortedList() {
-		nodeHostAddress, _ := any(nodeHostAddressT).(string)
-		_, ipNet, err := net.ParseCIDR(nodeHostAddress)
-		if err != nil {
-			return false, fmt.Errorf("failed to parse node host address %s: %v", nodeHostAddress, err)
-		}
-		if ipNet.Contains(egressIP) {
-			return true, nil
 		}
 	}
 	return false, nil
@@ -1380,10 +1304,6 @@ func (eIPC *egressIPClusterController) validateEgressIPStatus(name string, items
 			ip := net.ParseIP(eIPStatus.EgressIP)
 			if ip == nil {
 				klog.Errorf("Allocator error: EgressIP allocation contains unparsable IP address: %s", eIPStatus.EgressIP)
-				validAssignment = false
-			}
-			if ok, err := eIPC.isEgressIPWithinNetworkNode(eIPStatus.Node, ip); err != nil || !ok {
-				klog.Errorf("Allocator error: Egress IP does not have a valid network on node %s", eIPStatus.Node)
 				validAssignment = false
 			}
 			if node := eIPC.isAnyClusterNodeIP(ip); node != nil {

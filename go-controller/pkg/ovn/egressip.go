@@ -2135,3 +2135,17 @@ func getPodNamespaceAndNameFromKey(podKey string) (string, string) {
 	parts := strings.Split(podKey, "_")
 	return parts[0], parts[1]
 }
+
+func getSwitchManagementPortIP(node *v1.Node) (string, error) {
+	// fetch node annotation of the egress node
+	networkName := "default"
+	ipNets, err := util.ParseNodeHostSubnetAnnotation(node, networkName)
+	if err != nil {
+		return "", fmt.Errorf("failed to parse node (%s) subnets to get management port IP: %v", node.Name, err)
+	}
+	if len(ipNets) != 1 {
+		return "", fmt.Errorf("unexpected number of node (%s) subnets: %v", node.Name, ipNets)
+	}
+	mgntPortIP := util.GetNodeManagementIfAddr(ipNets[0])
+	return mgntPortIP.String(), nil
+}

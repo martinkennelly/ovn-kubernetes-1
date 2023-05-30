@@ -11,6 +11,7 @@ import (
 	kapi "k8s.io/api/core/v1"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/sets"
+	utilnet "k8s.io/utils/net"
 
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/config"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/kube"
@@ -701,6 +702,58 @@ func ParseNodeHostAddressesList(node *kapi.Node) ([]string, error) {
 			addrAnnotation, node.Name, err)
 	}
 	return cfg, nil
+}
+
+func IsSecondaryNetworkContainingIP(node *v1.Node, ip net.IP) bool {
+	network, err := GetSecondaryNetworkContainingIP(node, ip)
+	if err != nil || network == "" {
+		return false
+	}
+	return true
+}
+
+func GetSecondaryNetworkContainingIP(node *v1.Node, ip net.IP) (string, error) {
+	v6 := utilnet.IsIPv6(ip)
+	nodeHostAddresses, err := ParseNodeHostAddressesList(node)
+	if err != nil {
+		return "", fmt.Errorf("failed to parse node host addresses for node %q: %v", node.Name, err)
+	}
+	primaryNetwork, err := ParseNodePrimaryIfAddr(node)
+	nodeHostAddressFiltered := make([]string, 0)
+	for _, nodeHostAddress := range nodeHostAddresses {
+		nodeHostAddrIP, nodeHostAddrNet, err := net.ParseCIDR(nodeHostAddress)
+		if err != nil {
+			return "", fmt.Errorf("failed to parse a network (%q) on node %q: %v", nodeHostAddress, node.Name, err)
+		}
+		if v6 {
+			if !utilnet.IsIPv6(nodeHostAddrIP) {
+				continue
+			}
+			// exclude any primary network addresses from the list
+			if primaryNetwork.V6.Net != nil && primaryNetwork.V6.Net.Network() == nodeHostAddrNet.Network() {
+				continue
+			}
+			// save the network if egress IP is within the network subnet
+			if nodeHostAddrNet != nil && nodeHostAddrNet.Contains(ip) {
+				nodeHostAddressFiltered = append(nodeHostAddressFiltered, nodeHostAddress)
+			}
+		} else {
+			if !utilnet.IsIPv4(nodeHostAddrIP) {
+				continue
+			}
+			if nodeHostAddrNet != nil && nodeHostAddrNet.Contains(ip) {
+				nodeHostAddressFiltered = append(nodeHostAddressFiltered, nodeHostAddress)
+			}
+		}
+	}
+	if len(nodeHostAddressFiltered) == 0 {
+		return "", fmt.Errorf("no network found to host egres IP %s", ip.String())
+	}
+	if len(nodeHostAddressFiltered) != 1 {
+		return "", fmt.Errorf("unexpected number of networks found when trying to find a network to host "+
+			"IP %s on node %s: %v", ip.String(), node.Name, nodeHostAddressFiltered)
+	}
+	return nodeHostAddressFiltered[0], nil
 }
 
 // UpdateNodeIDAnnotation updates the ovnNodeID annotation with the node id in the annotations map

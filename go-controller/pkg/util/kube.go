@@ -78,6 +78,7 @@ type OVNNetworkControllerManagerClientset struct {
 type OVNNodeClientset struct {
 	KubeClient             kubernetes.Interface
 	EgressServiceClient    egressserviceclientset.Interface
+	EgressIPClient         egressipclientset.Interface
 	AdminPolicyRouteClient adminpolicybasedrouteclientset.Interface
 }
 
@@ -140,6 +141,7 @@ func (cs *OVNClientset) GetNodeClientset() *OVNNodeClientset {
 	return &OVNNodeClientset{
 		KubeClient:             cs.KubeClient,
 		EgressServiceClient:    cs.EgressServiceClient,
+		EgressIPClient:         cs.EgressIPClient,
 		AdminPolicyRouteClient: cs.AdminPolicyRouteClient,
 	}
 }

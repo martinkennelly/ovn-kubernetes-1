@@ -1,6 +1,8 @@
 package factory
 
 import (
+	egressipinformer "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/egressip/v1/apis/informers/externalversions/egressip/v1"
+
 	kapi "k8s.io/api/core/v1"
 	discovery "k8s.io/api/discovery/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -50,6 +52,7 @@ type NodeWatchFactory interface {
 	LocalPodInformer() cache.SharedIndexInformer
 	NamespaceInformer() coreinformers.NamespaceInformer
 	PodCoreInformer() v1coreinformers.PodInformer
+	EgressIPInformer() egressipinformer.EgressIPInformer
 
 	GetPods(namespace string) ([]*kapi.Pod, error)
 	GetPod(namespace, name string) (*kapi.Pod, error)

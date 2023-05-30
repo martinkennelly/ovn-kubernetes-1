@@ -1,16 +1,13 @@
-package link_manager
+package linkmanager
 
 import (
 	"fmt"
-	"github.com/vishvananda/netlink"
-
-	// "os"
-	// "strings"
 	"sync"
 	"time"
 
 	"k8s.io/klog/v2"
-	// utilnet "k8s.io/utils/net"
+
+	"github.com/vishvananda/netlink"
 )
 
 // gather all interfaces data address + mask and offer this as a service
@@ -39,7 +36,7 @@ func NewController(name string, v4, v6 bool) *Controller {
 	}
 }
 
-func (c *Controller) run(stopCh <-chan struct{}, doneWg *sync.WaitGroup) {
+func (c *Controller) Run(stopCh <-chan struct{}, doneWg *sync.WaitGroup) {
 	go func() {
 		defer doneWg.Done()
 		ticker := time.NewTicker(2 * time.Minute)
@@ -58,7 +55,7 @@ func (c *Controller) run(stopCh <-chan struct{}, doneWg *sync.WaitGroup) {
 	}()
 }
 
-func (c *Controller) addAddress(address netlink.Addr) error {
+func (c *Controller) AddAddress(address netlink.Addr) error {
 	if address.LinkIndex == 0 {
 		return fmt.Errorf("link index must be non-zero")
 	}
@@ -68,16 +65,37 @@ func (c *Controller) addAddress(address netlink.Addr) error {
 	if address.IPNet.IP.IsUnspecified() {
 		return fmt.Errorf("IP must be specified")
 	}
-	if _, err := netlink.LinkByIndex(address.LinkIndex); err != nil {
+	link, err := netlink.LinkByIndex(address.LinkIndex)
+	if err != nil {
 		return fmt.Errorf("no valid link associated with addresses %s: %v", address.String(), err)
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	// overwrite label to the name of this component in-order to aid address ownership
 	address.Label = c.name
-	if err := c.addAddressToStore(address); err != nil {
-		return fmt.Errorf("failed to add address %q: %v", address.String(), err)
+	c.addAddressToStore(link.Attrs().Name, address)
+	c.reconcile()
+	return nil
+}
+
+func (c *Controller) DelAddress(address netlink.Addr) error {
+	if address.LinkIndex == 0 {
+		return fmt.Errorf("link index must be non-zero")
 	}
+	if address.IPNet == nil {
+		return fmt.Errorf("IP must be non-nil")
+	}
+	if address.IPNet.IP.IsUnspecified() {
+		return fmt.Errorf("IP must be specified")
+	}
+	link, err := netlink.LinkByIndex(address.LinkIndex)
+	if err != nil {
+		return fmt.Errorf("no valid link associated with addresses %s: %v", address.String(), err)
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.delAddressFromStore(link.Attrs().Name, address)
+	c.reconcile()
 	return nil
 }
 
@@ -94,7 +112,7 @@ func (c *Controller) reconcile() {
 	}
 	for _, link := range links {
 		// get all addresses associated with the link depending on which IP families we support
-		addressesFound, err := c.getLinkAddressesByIPFamily(link)
+		addressesFound, err := c.GetLinkAddressesByIPFamily(link)
 		if err != nil {
 			klog.Errorf("Link Network Manager: failed to get address from link %q", link.Attrs().Name)
 			continue
@@ -148,16 +166,7 @@ func (c *Controller) reconcile() {
 	}
 }
 
-func containsAddress(addresses []netlink.Addr, candidate netlink.Addr) bool {
-	for _, address := range addresses {
-		if address.Equal(candidate) {
-			return true
-		}
-	}
-	return false
-}
-
-func (c *Controller) getLinkAddressesByIPFamily(link netlink.Link) ([]netlink.Addr, error) {
+func (c *Controller) GetLinkAddressesByIPFamily(link netlink.Link) ([]netlink.Addr, error) {
 	links := make([]netlink.Addr, 0)
 	if c.ipv4Enabled {
 		linksFound, err := netlink.AddrList(link, netlink.FAMILY_V4)
@@ -176,15 +185,11 @@ func (c *Controller) getLinkAddressesByIPFamily(link netlink.Link) ([]netlink.Ad
 	return links, nil
 }
 
-func (c *Controller) addAddressToStore(newAddress netlink.Addr) error {
-	link, err := netlink.LinkByIndex(newAddress.LinkIndex)
-	if err != nil {
-		return fmt.Errorf("failed to find link by index: %v", err)
-	}
-	addressesSaved, found := c.store[link.Attrs().Name]
+func (c *Controller) addAddressToStore(linkName string, newAddress netlink.Addr) {
+	addressesSaved, found := c.store[linkName]
 	if !found {
-		c.store[link.Attrs().Name] = []netlink.Addr{newAddress}
-		return nil
+		c.store[linkName] = []netlink.Addr{newAddress}
+		return
 	}
 	// check if the address already exists
 	found = false
@@ -196,41 +201,29 @@ func (c *Controller) addAddressToStore(newAddress netlink.Addr) error {
 	}
 	// add it to store if not found
 	if !found {
-		c.store[link.Attrs().Name] = append(addressesSaved, newAddress)
+		c.store[linkName] = append(addressesSaved, newAddress)
 	}
-	return nil
 }
 
-/*
-
-// detects if the IP is valid for a node
-// excludes things like local IPs, mgmt port ip, special masquerade IP
-func (c *egressIpNodeManager) isValidNodeIP(addr net.IP) bool {
-	if addr == nil {
-		return false
+func (c *Controller) delAddressFromStore(linkName string, address netlink.Addr) {
+	addressesSaved, found := c.store[linkName]
+	if !found {
+		return
 	}
-	if addr.IsLinkLocalUnicast() {
-		return false
+	temp := addressesSaved[:0]
+	for _, addressSaved := range addressesSaved {
+		if !addressSaved.Equal(address) {
+			temp = append(temp, address)
+		}
 	}
-	if addr.IsLoopback() {
-		return false
-	}
-
-	// if utilnet.IsIPv4(addr) {
-	// 	if c.mgmtPortConfig.ipv4 != nil && c.mgmtPortConfig.ipv4.ifAddr.IP.Equal(addr) {
-	// 		return false
-	// 	}
-	// } else if utilnet.IsIPv6(addr) {
-	// 	if c.mgmtPortConfig.ipv6 != nil && c.mgmtPortConfig.ipv6.ifAddr.IP.Equal(addr) {
-	// 		return false
-	// 	}
-	// }
-
-	if util.IsAddressReservedForInternalUse(addr) {
-		return false
-	}
-
-	return true
+	c.store[linkName] = temp
 }
 
-*/
+func containsAddress(addresses []netlink.Addr, candidate netlink.Addr) bool {
+	for _, address := range addresses {
+		if address.Equal(candidate) {
+			return true
+		}
+	}
+	return false
+}
