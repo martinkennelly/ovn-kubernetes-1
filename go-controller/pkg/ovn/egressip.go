@@ -1433,26 +1433,34 @@ func (e *egressIPZoneController) addPodEgressIPAssignment(egressIPName string, s
 			metrics.RecordEgressIPAssign(duration)
 		}()
 	}
+
 	isLocalZoneEgressNode, loadedEgressNode := e.nodeZoneState.Load(status.Node)
 	isLocalZonePod, loadedPodNode := e.nodeZoneState.Load(pod.Spec.NodeName)
+	nextHopIP, err := e.getNextHop(pod.Spec.NodeName, status.EgressIP, egressIPName, isLocalZonePod, status.RouteViaHost)
+	if err != nil {
+		return fmt.Errorf("failed to get next hop for pod %s/%s when configuring egress IP %s: %v", pod.Namespace,
+			pod.Name, egressIPName, err)
+	}
 	var ops []ovsdb.Operation
 	if loadedEgressNode && isLocalZoneEgressNode {
-		ops, err = createNATRuleOps(e.nbClient, nil, podIPs, status, egressIPName)
-		if err != nil {
-			return fmt.Errorf("unable to create NAT rule ops for status: %v, err: %v", status, err)
-		}
-		if config.OVNKubernetesFeature.EnableInterconnect && (loadedPodNode && !isLocalZonePod) {
-			// configure reroute for non-local-zone pods on egress nodes
-			ops, err = e.createStaticRouteOps(ops, podIPs, status, egressIPName)
+		if !status.RouteViaHost {
+			ops, err = createNATRuleOps(e.nbClient, nil, podIPs, status, egressIPName)
 			if err != nil {
-				return fmt.Errorf("unable to create logical router static route ops %v, err: %v", status, err)
+				return fmt.Errorf("unable to create NAT rule ops for status: %v, err: %v", status, err)
+			}
+			if config.OVNKubernetesFeature.EnableInterconnect && (loadedPodNode && !isLocalZonePod) {
+				// configure reroute for non-local-zone pods on egress nodes
+				ops, err = e.createStaticRouteOps(ops, podIPs, status, egressIPName)
+				if err != nil {
+					return fmt.Errorf("unable to create logical router static route ops %v, err: %v", status, err)
+				}
 			}
 		}
 	}
 
 	// don't add a reroute policy if the egress node towards which we are adding this doesn't exist
 	if loadedEgressNode && loadedPodNode && isLocalZonePod {
-		ops, err = e.createReroutePolicyOps(ops, podIPs, status, egressIPName)
+		ops, err = e.createReroutePolicyOps(ops, podIPs, status, egressIPName, nextHopIP)
 		if err != nil {
 			return fmt.Errorf("unable to create logical router policy ops, err: %v", err)
 		}
@@ -1481,13 +1489,14 @@ func (e *egressIPZoneController) deletePodEgressIPAssignment(egressIPName string
 	}
 
 	isLocalZonePod, loadedPodNode := e.nodeZoneState.Load(pod.Spec.NodeName)
+	nextHopIP, err := e.getNextHop(pod.Spec.NodeName, status.EgressIP, egressIPName, isLocalZonePod, status.RouteViaHost)
 	var ops []ovsdb.Operation
 	if !loadedPodNode || isLocalZonePod { // node is deleted (we can't determine zone so we always try and nuke OR pod is local to zone)
 		ops, err = e.addExternalGWPodSNATOps(nil, pod.Namespace, pod.Name, status)
 		if err != nil {
 			return err
 		}
-		ops, err = e.deleteReroutePolicyOps(ops, podIPs, status, egressIPName)
+		ops, err = e.deleteReroutePolicyOps(ops, podIPs, status, egressIPName, nextHopIP)
 		if errors.Is(err, libovsdbclient.ErrNotFound) {
 			// if the gateway router join IP setup is already gone, then don't count it as error.
 			klog.Warningf("Unable to delete logical router policy, err: %v", err)
@@ -1496,7 +1505,7 @@ func (e *egressIPZoneController) deletePodEgressIPAssignment(egressIPName string
 		}
 	}
 	isLocalZoneEgressNode, loadedEgressNode := e.nodeZoneState.Load(status.Node)
-	if loadedEgressNode && isLocalZoneEgressNode {
+	if loadedEgressNode && isLocalZoneEgressNode && !status.RouteViaHost {
 		if config.OVNKubernetesFeature.EnableInterconnect && (!loadedPodNode || !isLocalZonePod) { // node is deleted (we can't determine zone so we always try and nuke OR pod is remote to zone)
 			// delete reroute for non-local-zone pods on egress nodes
 			ops, err = e.deleteStaticRouteOps(ops, podIPs, status, egressIPName)
@@ -1633,6 +1642,43 @@ func (e *egressIPZoneController) getTransitIP(nodeName string, wantsIPv6 bool) (
 	return nodeTransitIP.IP.String(), nil
 }
 
+func (e *egressIPZoneController) getNextHop(podNodeName, egressIP, egressIPName string, isLocalZoneEgressNode, routeViaHost bool) (string, error) {
+	var nextHopIP string
+	var err error
+	isEgressIPv6 := utilnet.IsIPv6String(egressIP)
+	// NOTE: No need to check if status.node exists or not in the cache, we are calling this function only if it
+	// is present in the nodeZoneState cache. Since we call it with lock on cache, we are safe here.
+	if isLocalZoneEgressNode {
+		if routeViaHost {
+			node, err := e.watchFactory.GetNode(podNodeName)
+			if err != nil {
+				return "", fmt.Errorf("failed to get node %s from cache: %v", podNodeName, err)
+			}
+			nextHopIP, err = getSwitchManagementPortIP(node)
+			if err != nil {
+				return "", fmt.Errorf("failed to get management IP for node %s: %v", node.Name, err)
+			}
+		} else {
+			gatewayRouterIP, err := e.getGatewayRouterJoinIP(podNodeName, isEgressIPv6)
+			if err != nil {
+				return "", fmt.Errorf("unable to retrieve gateway IP for node: %s, protocol is IPv6: %v, err: %w", podNodeName, isEgressIPv6, err)
+			}
+			nextHopIP = gatewayRouterIP.String()
+		}
+	} else if config.OVNKubernetesFeature.EnableInterconnect {
+		// fetch node annotation of the egress node
+		nextHopIP, err = e.getTransitIP(podNodeName, isEgressIPv6)
+		if err != nil {
+			return "", fmt.Errorf("unable to fetch transit switch IP for node %s: %v", podNodeName, err)
+		}
+	}
+	// if neither of these above conditions are met, return error since we don't want to add an empty nextHop LRP
+	if nextHopIP == "" {
+		return "", fmt.Errorf("unable to determine nextHop for egressIP %s", egressIPName)
+	}
+	return nextHopIP, nil
+}
+
 // createReroutePolicyOps creates an operation that does idempotent updates of the
 // LogicalRouterPolicy corresponding to the egressIP status item, according to the
 // following update procedure:
@@ -1642,30 +1688,9 @@ func (e *egressIPZoneController) getTransitIP(nodeName string, wantsIPv6 bool) (
 // - if the LogicalRouterPolicy does exist: it adds the gatewayRouterIP to the
 // array of nexthops
 // This function should be called with lock on nodeZoneState cache key status.Node
-func (e *egressIPZoneController) createReroutePolicyOps(ops []ovsdb.Operation, podIPNets []*net.IPNet, status egressipv1.EgressIPStatusItem, egressIPName string) ([]ovsdb.Operation, error) {
+func (e *egressIPZoneController) createReroutePolicyOps(ops []ovsdb.Operation, podIPNets []*net.IPNet, status egressipv1.EgressIPStatusItem, egressIPName, nextHopIP string) ([]ovsdb.Operation, error) {
 	isEgressIPv6 := utilnet.IsIPv6String(status.EgressIP)
-	var nextHopIP string
 	var err error
-	// NOTE: No need to check if status.node exists or not in the cache, we are calling this function only if it
-	// is present in the nodeZoneState cache. Since we call it with lock on cache, we are safe here.
-	isLocalZoneEgressNode, _ := e.nodeZoneState.Load(status.Node)
-	if isLocalZoneEgressNode {
-		gatewayRouterIP, err := e.getGatewayRouterJoinIP(status.Node, isEgressIPv6)
-		if err != nil {
-			return nil, fmt.Errorf("unable to retrieve gateway IP for node: %s, protocol is IPv6: %v, err: %w", status.Node, isEgressIPv6, err)
-		}
-		nextHopIP = gatewayRouterIP.String()
-	} else if config.OVNKubernetesFeature.EnableInterconnect {
-		// fetch node annotation of the egress node
-		nextHopIP, err = e.getTransitIP(status.Node, isEgressIPv6)
-		if err != nil {
-			return nil, fmt.Errorf("unable to fetch transit switch IP for node %s: %v", status.Node, err)
-		}
-	}
-	// if neither of these above conditions are met, return error since we don't want to add an empty nextHop LRP
-	if nextHopIP == "" {
-		return nil, fmt.Errorf("unable to determine nextHop for egressIP %s with status %v", egressIPName, status)
-	}
 	// Handle all pod IPs that match the egress IP address family
 	for _, podIPNet := range util.MatchAllIPNetFamily(isEgressIPv6, podIPNets) {
 		lrp := nbdb.LogicalRouterPolicy{
@@ -1697,31 +1722,9 @@ func (e *egressIPZoneController) createReroutePolicyOps(ops []ovsdb.Operation, p
 // - if the LogicalRouterPolicy exist and has the len(nexthops) == 1: it removes
 // the LogicalRouterPolicy completely
 // This function should be called with lock on nodeZoneState cache key status.Node
-func (e *egressIPZoneController) deleteReroutePolicyOps(ops []ovsdb.Operation, podIPNets []*net.IPNet, status egressipv1.EgressIPStatusItem, egressIPName string) ([]ovsdb.Operation, error) {
+func (e *egressIPZoneController) deleteReroutePolicyOps(ops []ovsdb.Operation, podIPNets []*net.IPNet, status egressipv1.EgressIPStatusItem, egressIPName, nextHopIP string) ([]ovsdb.Operation, error) {
 	isEgressIPv6 := utilnet.IsIPv6String(status.EgressIP)
-	var nextHopIP string
 	var err error
-	isLocalZoneEgressNode, loadedEgressNode := e.nodeZoneState.Load(status.Node)
-	if loadedEgressNode && isLocalZoneEgressNode {
-		gatewayRouterIP, err := e.getGatewayRouterJoinIP(status.Node, isEgressIPv6)
-		if err != nil {
-			return nil, fmt.Errorf("unable to retrieve gateway IP for node: %s, protocol is IPv6: %v, err: %w", status.Node, isEgressIPv6, err)
-		}
-		nextHopIP = gatewayRouterIP.String()
-	} else if config.OVNKubernetesFeature.EnableInterconnect {
-		// fetch node annotation of the egress node
-		nextHopIP, err = e.getTransitIP(status.Node, isEgressIPv6)
-		if apierrors.IsNotFound(err) {
-			// if the node is already gone, then don't count it as error as during deletion.
-			klog.Warningf("Unable to fetch transit switch IP for node: %s: err: %v", status.Node, err)
-		} else if err != nil {
-			return nil, fmt.Errorf("unable to fetch transit switch IP for node %s: %v", status.Node, err)
-		}
-	}
-	// if neither of these above conditions are met, return error since we can't remove an empty nextHop LRP
-	if nextHopIP == "" {
-		return nil, fmt.Errorf("unable to determine nextHop for egressIP %s with status %v", egressIPName, status)
-	}
 	// Handle all pod IPs that match the egress IP address family
 	for _, podIPNet := range util.MatchAllIPNetFamily(isEgressIPv6, podIPNets) {
 		filterOption := fmt.Sprintf("%s.src == %s", ipFamilyName(isEgressIPv6), podIPNet.IP.String())
