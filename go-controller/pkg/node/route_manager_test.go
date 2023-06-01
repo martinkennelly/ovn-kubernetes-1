@@ -15,6 +15,10 @@ import (
 )
 
 var _ = ginkgo.Describe("Route Manager", func() {
+	if os.Getenv("NOROOT") == "TRUE" {
+		defer ginkgo.GinkgoRecover()
+		ginkgo.Skip("Root required to unit test route manager")
+	}
 	var rm *routeManager
 	var stopCh chan struct{}
 	var wg *sync.WaitGroup
@@ -34,9 +38,6 @@ var _ = ginkgo.Describe("Route Manager", func() {
 	loIP := net.IPv4(127, 1, 1, 1)
 	loIPDiff := net.IPv4(127, 1, 1, 2)
 	loGWIP := net.IPv4(127, 1, 1, 254)
-	if os.Getuid() != 0 {
-		ginkgo.Skip("Test requires root privileges")
-	}
 
 	ginkgo.BeforeEach(func() {
 		var err error
