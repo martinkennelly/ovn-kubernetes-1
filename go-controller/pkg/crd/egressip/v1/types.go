@@ -41,8 +41,8 @@ type EgressIPStatusItem struct {
 	Node string `json:"node"`
 	// Assigned egress IP
 	EgressIP string `json:"egressIP"`
-	// Route via host network or OVN
-	RouteViaHost bool `json:"routeViaHost"`
+	// Assigned network
+	Network string `json:"network"`
 }
 
 // EgressIPSpec is a desired state description of EgressIP.

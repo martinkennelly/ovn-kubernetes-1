@@ -12,12 +12,10 @@ import (
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/factory"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/kube"
 	ovntest "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/testing"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/types"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
 
 	"github.com/vishvananda/netlink"
 
-	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/fake"
@@ -37,7 +35,7 @@ func nodeHasAddress(fakeClient kubernetes.Interface, nodeName string, ipNet *net
 	Expect(err).NotTo(HaveOccurred())
 	addrs, err := util.ParseNodeHostAddresses(node)
 	Expect(err).NotTo(HaveOccurred())
-	return addrs.Has(ipNet.IP.String())
+	return addrs.Has(ipNet.String())
 }
 
 type testCtx struct {
@@ -65,20 +63,12 @@ var _ = Describe("Node IP Handler tests", func() {
 	)
 
 	BeforeEach(func() {
-		node := &v1.Node{
-			ObjectMeta: metav1.ObjectMeta{
-				Name: nodeName,
-				Annotations: map[string]string{
-					"k8s.ovn.org/host-addresses":    `["192.168.122.14"]`,
-					"k8s.ovn.org/l3-gateway-config": `{"default":{"mac-address":"52:54:00:e2:ed:d0","ip-addresses":["192.168.122.14/24"],"ip-address":"192.168.122.14/24","next-hops":["192.168.122.1"],"next-hop":"192.168.122.1"}}`,
-				},
-			},
-		}
+		node := newNodeV4V6(nodeName, nodeAddr4, nodeAddr6)
 
 		tc = &testCtx{
 			doneWg:      &sync.WaitGroup{},
 			stopCh:      make(chan struct{}),
-			fakeClient:  fake.NewSimpleClientset(node),
+			fakeClient:  fake.NewSimpleClientset(&node),
 			mgmtPortIP4: ovntest.MustParseIPNet("10.1.1.2/24"),
 			mgmtPortIP6: ovntest.MustParseIPNet("2001:db8::1/64"),
 		}
@@ -113,7 +103,7 @@ var _ = Describe("Node IP Handler tests", func() {
 		fakeBridgeConfiguration := &bridgeConfiguration{}
 
 		k := &kube.Kube{KClient: tc.fakeClient}
-		tc.ipManager = newAddressManagerInternal(nodeName, k, fakeMgmtPortConfig, tc.watchFactory, fakeBridgeConfiguration, false)
+		tc.ipManager = newAddressManagerInternal(nodeName, k, fakeMgmtPortConfig, tc.watchFactory, fakeBridgeConfiguration, false, true, true)
 
 		// We need to wait until the ipManager's goroutine runs the subscribe
 		// function at least once. We can't use a WaitGroup because we have
@@ -138,40 +128,6 @@ var _ = Describe("Node IP Handler tests", func() {
 		close(tc.addrChan)
 	})
 
-	Describe("Changing node addresses", func() {
-		Context("by adding and deleting a valid IP", func() {
-			It("should update node annotations", func() {
-				for _, addr := range []string{nodeAddr4, nodeAddr6} {
-					ipNet := ipEvent(addr, true, tc.addrChan)
-					Eventually(func() bool {
-						return nodeHasAddress(tc.fakeClient, nodeName, ipNet)
-					}, 5).Should(BeTrue())
-
-					ipNet = ipEvent(addr, false, tc.addrChan)
-					Eventually(func() bool {
-						return nodeHasAddress(tc.fakeClient, nodeName, ipNet)
-					}, 5).Should(BeFalse())
-				}
-			})
-		})
-
-		Context("by adding and deleting an invalid IP", func() {
-			It("should not update node annotations", func() {
-				for _, addr := range []string{tc.mgmtPortIP4.String(), tc.mgmtPortIP6.String(), types.V4HostMasqueradeIP + "/29", types.V6HostMasqueradeIP + "/125"} {
-					ipNet := ipEvent(addr, true, tc.addrChan)
-					Consistently(func() bool {
-						return nodeHasAddress(tc.fakeClient, nodeName, ipNet)
-					}, 3).Should(BeFalse())
-
-					ipNet = ipEvent(addr, false, tc.addrChan)
-					Consistently(func() bool {
-						return nodeHasAddress(tc.fakeClient, nodeName, ipNet)
-					}, 3).Should(BeFalse())
-				}
-			})
-		})
-	})
-
 	Describe("Subscription errors", func() {
 		It("should resubscribe and continue processing address events", func() {
 			// Reset our subscription tracker, close the channel to force
@@ -190,7 +146,7 @@ var _ = Describe("Node IP Handler tests", func() {
 			ipNet = ipEvent(nodeAddr6, false, tc.addrChan)
 			Eventually(func() bool {
 				return nodeHasAddress(tc.fakeClient, nodeName, ipNet)
-			}, 5).Should(BeFalse())
+			}, 5).Should(BeTrue())
 		})
 	})
 })

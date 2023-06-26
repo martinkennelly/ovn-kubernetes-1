@@ -486,7 +486,7 @@ func (oc *DefaultNetworkController) addExternalSwitch(prefix, interfaceID, nodeN
 	// mode, whenever ovnkube-node container restarts a new br-local bridge will
 	// be created with a new `nicMacAddress`.
 	externalRouterPort := prefix + types.GWRouterToExtSwitchPrefix + gatewayRouter
-
+	klog.Errorf("## addexternalSwitch: node %s interface id %s", nodeName, interfaceID)
 	externalRouterPortNetworks := []string{}
 	for _, ip := range ipAddresses {
 		externalRouterPortNetworks = append(externalRouterPortNetworks, ip.String())

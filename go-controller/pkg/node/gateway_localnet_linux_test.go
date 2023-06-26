@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"strings"
 	"sync"
 
 	. "github.com/onsi/ginkgo"
@@ -67,8 +68,8 @@ func startNodePortWatcher(n *nodePortWatcher, fakeClient *util.OVNNodeClientset,
 	}
 
 	k := &kube.Kube{KClient: fakeClient.KubeClient}
-	n.nodeIPManager = newAddressManagerInternal(fakeNodeName, k, fakeMgmtPortConfig, n.watchFactory, nil, false)
-	localHostNetEp := "192.168.18.15/32"
+	n.nodeIPManager = newAddressManagerInternal(fakeNodeName, k, fakeMgmtPortConfig, n.watchFactory, nil, false, true, false)
+	localHostNetEp := "192.168.18.15/24"
 	ip, ipnet, _ := net.ParseCIDR(localHostNetEp)
 	n.nodeIPManager.addAddr(net.IPNet{IP: ip, Mask: ipnet.Mask})
 
@@ -99,7 +100,7 @@ func startNodePortWatcherWithRetry(n *nodePortWatcher, fakeClient *util.OVNNodeC
 	}
 
 	k := &kube.Kube{KClient: fakeClient.KubeClient}
-	n.nodeIPManager = newAddressManagerInternal(fakeNodeName, k, fakeMgmtPortConfig, n.watchFactory, nil, false)
+	n.nodeIPManager = newAddressManagerInternal(fakeNodeName, k, fakeMgmtPortConfig, n.watchFactory, nil, false, true, false)
 	localHostNetEp := "192.168.18.15/32"
 	ip, ipnet, _ := net.ParseCIDR(localHostNetEp)
 	n.nodeIPManager.addAddr(net.IPNet{IP: ip, Mask: ipnet.Mask})
@@ -2223,11 +2224,16 @@ var _ = Describe("Node Operations", func() {
 					[]discovery.Endpoint{ep1},
 					[]discovery.EndpointPort{epPort1})
 
+				node := newNodeV4("node", "192.168.18.15/24")
+
 				fakeOvnNode.start(ctx,
 					&v1.ServiceList{
 						Items: []v1.Service{
 							service,
 						},
+					},
+					&v1.NodeList{
+						Items: []v1.Node{node},
 					},
 					&endpointSlice,
 				)
@@ -2235,7 +2241,7 @@ var _ = Describe("Node Operations", func() {
 				fNPW.watchFactory = fakeOvnNode.watcher
 				Expect(startNodePortWatcher(fNPW, fakeOvnNode.fakeClient, &fakeMgmtPortConfig)).To(Succeed())
 				// to ensure the endpoint is local-host-networked
-				res := fNPW.nodeIPManager.addresses.Has(ep1.Addresses[0])
+				res := fNPW.nodeIPManager.addresses.Has(ep1.Addresses[0] + "/24")
 				Expect(res).To(BeTrue())
 				err := fNPW.AddService(&service)
 				Expect(err).NotTo(HaveOccurred())
@@ -2481,6 +2487,7 @@ var _ = Describe("Node Operations", func() {
 				config.Gateway.Mode = config.GatewayModeLocal
 				epPortName := "https"
 				outport := int32(443)
+				node := newNodeV4("node", "192.168.18.15/24")
 				service := *newService("service1", "namespace1", "10.129.0.2",
 					[]v1.ServicePort{
 						{
@@ -2517,13 +2524,16 @@ var _ = Describe("Node Operations", func() {
 							service,
 						},
 					},
+					&v1.NodeList{
+						Items: []v1.Node{node},
+					},
 					&endpointSlice,
 				)
 
 				fNPW.watchFactory = fakeOvnNode.watcher
 				Expect(startNodePortWatcher(fNPW, fakeOvnNode.fakeClient, &fakeMgmtPortConfig)).To(Succeed())
 				// to ensure the endpoint is local-host-networked
-				res := fNPW.nodeIPManager.addresses.Has(endpointSlice.Endpoints[0].Addresses[0])
+				res := fNPW.nodeIPManager.addresses.Has(endpointSlice.Endpoints[0].Addresses[0] + "/24")
 				Expect(res).To(BeTrue())
 				err := fNPW.AddService(&service)
 				Expect(err).NotTo(HaveOccurred())
@@ -2623,3 +2633,65 @@ var _ = Describe("Node Operations", func() {
 		})
 	})
 })
+
+func newNodeV4(nodeName, nodeIPv4 string) v1.Node {
+	ipCIDRSplit := strings.Split(nodeIPv4, "/")
+	return v1.Node{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: nodeName,
+			Annotations: map[string]string{
+				"k8s.ovn.org/node-primary-ifaddr": fmt.Sprintf("{\"ipv4\": \"%s\", \"ipv6\": \"%s\"}", nodeIPv4, ""),
+				"k8s.ovn.org/node-subnets":        fmt.Sprintf("{\"default\":\"%s\"}", "128.1.0.0/24"),
+				"k8s.ovn.org/host-addresses":      fmt.Sprintf("[\"%s\"]", nodeIPv4),
+			},
+		},
+		Status: v1.NodeStatus{
+			Conditions: []v1.NodeCondition{
+				{
+					Type:   v1.NodeReady,
+					Status: v1.ConditionTrue,
+				},
+			},
+			Addresses: []v1.NodeAddress{
+				{
+					Type:    v1.NodeInternalIP,
+					Address: ipCIDRSplit[0],
+				},
+			},
+		},
+	}
+}
+
+func newNodeV4V6(nodeName, nodeIPv4, nodeIPv6 string) v1.Node {
+	ipCIDRSplitV4 := strings.Split(nodeIPv4, "/")
+	ipCIDRSplitV6 := strings.Split(nodeIPv6, "/")
+	return v1.Node{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: nodeName,
+			Annotations: map[string]string{
+				"k8s.ovn.org/node-primary-ifaddr": fmt.Sprintf("{\"ipv4\": \"%s\", \"ipv6\": \"%s\"}", nodeIPv4, nodeIPv6),
+				"k8s.ovn.org/node-subnets":        fmt.Sprintf("{\"default\":\"%s\"}", "128.1.0.0/24"),
+				"k8s.ovn.org/host-addresses":      fmt.Sprintf("[\"%s\",\"%s\"]", nodeIPv4, nodeIPv6),
+				"k8s.ovn.org/l3-gateway-config":   `{"default":{"mac-address":"52:54:00:e2:ed:d0","ip-addresses":["192.168.122.14/24"],"ip-address":"192.168.122.14/24","next-hops":["192.168.122.1"],"next-hop":"192.168.122.1"}}`,
+			},
+		},
+		Status: v1.NodeStatus{
+			Conditions: []v1.NodeCondition{
+				{
+					Type:   v1.NodeReady,
+					Status: v1.ConditionTrue,
+				},
+			},
+			Addresses: []v1.NodeAddress{
+				{
+					Type:    v1.NodeInternalIP,
+					Address: ipCIDRSplitV4[0],
+				},
+				{
+					Type:    v1.NodeInternalIP,
+					Address: ipCIDRSplitV6[0],
+				},
+			},
+		},
+	}
+}

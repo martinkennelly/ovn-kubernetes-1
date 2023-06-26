@@ -458,6 +458,7 @@ func NewNodeWatchFactory(ovnClientset *util.OVNNodeClientset, nodeName string) (
 			return nil, err
 		}
 	}
+	klog.Errorf("### egress IP flag %v", config.OVNKubernetesFeature.EnableEgressIP)
 	if config.OVNKubernetesFeature.EnableEgressIP {
 		wf.informers[EgressIPType], err = newInformer(EgressIPType, wf.eipFactory.K8s().V1().EgressIPs().Informer())
 		if err != nil {

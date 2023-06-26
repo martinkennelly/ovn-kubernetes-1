@@ -30,6 +30,8 @@ type ObjectCacheInterface interface {
 //
 // If you add a new method here, make sure the underlying informer is started
 // in factory.go NewNodeWatchFactory
+//
+//go:generate mockery --name NodeWatchFactory
 type NodeWatchFactory interface {
 	Shutdownable
 

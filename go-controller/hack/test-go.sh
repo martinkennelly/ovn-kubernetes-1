@@ -1,5 +1,6 @@
 #!/bin/bash
 set -e
+set -x
 
 source "$(dirname "${BASH_SOURCE}")/init.sh"
 
@@ -14,7 +15,7 @@ function gocmd {
 
 cd "${OVN_KUBE_ROOT}"
 
-PKGS=$(gocmd list -mod vendor -f '{{if len .TestGoFiles}} {{.ImportPath}} {{end}}' ${PKGS:-./cmd/... ./pkg/... ./hybrid-overlay/...} | xargs)
+PKGS=$(go list -buildvcs=false -mod vendor -f '{{if len .TestGoFiles}} {{.ImportPath}} {{end}}' ${PKGS:-./cmd/... ./pkg/... ./hybrid-overlay/...} | xargs)
 
 if [[ "$1" == "focus" && "$2" != "" ]]; then
     ginkgo_focus="-ginkgo.focus="$(echo ${2} | sed 's/ /\\s/g')""

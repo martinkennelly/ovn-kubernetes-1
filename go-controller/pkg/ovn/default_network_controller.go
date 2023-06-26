@@ -837,7 +837,7 @@ func (h *defaultNetworkControllerEventHandler) UpdateResource(oldObj, newObj int
 		if !ok {
 			return fmt.Errorf("could not cast oldObj of type %T to *kapi.Node", oldObj)
 		}
-
+		klog.Errorf("### Node type update for node %s", newNode.Name)
 		// +--------------------+-------------------+-------------------------------------------------+
 		// |    oldNode         |      newNode      |       Action                                    |
 		// |--------------------+-------------------+-------------------------------------------------+
@@ -914,6 +914,7 @@ func (h *defaultNetworkControllerEventHandler) UpdateResource(oldObj, newObj int
 		newNode := newObj.(*kapi.Node)
 		// Update node in zone cache; value will be true if node is local
 		// to this zone and false if its not
+		klog.Errorf("## UPDATE event happened for node %s", newNode.Name)
 		h.oc.eIPC.nodeZoneState.LockKey(newNode.Name)
 		h.oc.eIPC.nodeZoneState.Store(newNode.Name, h.oc.isLocalZoneNode(newNode))
 		h.oc.eIPC.nodeZoneState.UnlockKey(newNode.Name)
@@ -961,6 +962,7 @@ func (h *defaultNetworkControllerEventHandler) DeleteResource(obj, cachedObj int
 		return h.oc.deleteNetworkPolicy(knp)
 
 	case factory.NodeType:
+		klog.Errorf("### delete event for node at NodeType !!")
 		node, ok := obj.(*kapi.Node)
 		if !ok {
 			return fmt.Errorf("could not cast obj of type %T to *knet.Node", obj)
@@ -990,6 +992,7 @@ func (h *defaultNetworkControllerEventHandler) DeleteResource(obj, cachedObj int
 
 	case factory.EgressNodeType:
 		node := obj.(*kapi.Node)
+		klog.Errorf("## Delete event happened for node %s", node.Name)
 		// remove the GARP setup for the node
 		if err := h.oc.deleteEgressNode(node); err != nil {
 			return err

@@ -110,7 +110,59 @@ func newNode(nodeName, nodeIPv4 string) *v1.Node {
 			Name: nodeName,
 			Annotations: map[string]string{
 				"k8s.ovn.org/node-primary-ifaddr": fmt.Sprintf("{\"ipv4\": \"%s\", \"ipv6\": \"%s\"}", nodeIPv4, ""),
-				"k8s.ovn.org/node-subnets":        fmt.Sprintf("{\"default\":\"%s\"}", v4NodeSubnet),
+				"k8s.ovn.org/node-subnets":        fmt.Sprintf("{\"default\":\"%s\"}", v4Node1Subnet),
+				"k8s.ovn.org/host-addresses":      fmt.Sprintf("[\"%s\"]", nodeIPv4),
+				"k8s.ovn.org/zone-name":           "global",
+			},
+			Labels: map[string]string{
+				"k8s.ovn.org/egress-assignable": "",
+			},
+		},
+		Status: v1.NodeStatus{
+			Conditions: []v1.NodeCondition{
+				{
+					Type:   v1.NodeReady,
+					Status: v1.ConditionTrue,
+				},
+			},
+		},
+	}
+}
+
+func newNodeGlobalZoneNotEgressableV4Only(nodeName, nodeIPv4 string) *v1.Node {
+	return &v1.Node{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: nodeName,
+			Annotations: map[string]string{
+				"k8s.ovn.org/node-primary-ifaddr": fmt.Sprintf("{\"ipv4\": \"%s\", \"ipv6\": \"%s\"}", nodeIPv4, ""),
+				"k8s.ovn.org/node-subnets":        fmt.Sprintf("{\"default\":\"%s\"}", v4Node1Subnet),
+				"k8s.ovn.org/host-addresses":      fmt.Sprintf("[\"%s\"]", nodeIPv4),
+				"k8s.ovn.org/zone-name":           "global",
+			},
+			Labels: map[string]string{
+				"k8s.ovn.org/egress-assignable": "",
+			},
+		},
+		Status: v1.NodeStatus{
+			Conditions: []v1.NodeCondition{
+				{
+					Type:   v1.NodeReady,
+					Status: v1.ConditionTrue,
+				},
+			},
+		},
+	}
+}
+
+func newNodeGlobalZoneNotEgressableV6Only(nodeName, nodeIPv6 string) *v1.Node {
+	return &v1.Node{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: nodeName,
+			Annotations: map[string]string{
+				"k8s.ovn.org/node-primary-ifaddr": fmt.Sprintf("{\"ipv4\": \"%s\", \"ipv6\": \"%s\"}", "", nodeIPv6),
+				"k8s.ovn.org/node-subnets":        fmt.Sprintf("{\"default\":\"%s\"}", v6Node1Subnet),
+				"k8s.ovn.org/host-addresses":      fmt.Sprintf("[\"%s\"]", nodeIPv6),
+				"k8s.ovn.org/zone-name":           "global",
 			},
 			Labels: map[string]string{
 				"k8s.ovn.org/egress-assignable": "",
@@ -1735,7 +1787,7 @@ var _ = ginkgo.Describe("OVN Pod Operations", func() {
 
 				// we don't know the real switch UUID in the db, but it can be found by name
 				swUUID := getLogicalSwitchUUID(fakeOvn.controller.nbClient, testNode.Name)
-				fakeOvn.controller.lsManager.AddSwitch(testNode.Name, swUUID, []*net.IPNet{ovntest.MustParseIPNet(v4NodeSubnet)})
+				fakeOvn.controller.lsManager.AddSwitch(testNode.Name, swUUID, []*net.IPNet{ovntest.MustParseIPNet(v4Node1Subnet)})
 				err := fakeOvn.controller.WatchNamespaces()
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
 				err = fakeOvn.controller.WatchPods()
@@ -1968,7 +2020,7 @@ var _ = ginkgo.Describe("OVN Pod Operations", func() {
 				)
 				// we don't know the real switch UUID in the db, but it can be found by name
 				swUUID := getLogicalSwitchUUID(fakeOvn.controller.nbClient, testNodeWithLS.Name)
-				fakeOvn.controller.lsManager.AddSwitch(testNodeWithLS.Name, swUUID, []*net.IPNet{ovntest.MustParseIPNet(v4NodeSubnet)})
+				fakeOvn.controller.lsManager.AddSwitch(testNodeWithLS.Name, swUUID, []*net.IPNet{ovntest.MustParseIPNet(v4Node1Subnet)})
 				err := fakeOvn.controller.WatchPods()
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
 				// expect stale logical switch port removed if reconciliation is successful

@@ -118,7 +118,7 @@ func newDefaultNodeNetworkController(cnnci *CommonNodeNetworkControllerInfo, sto
 			stopChan:                        stopChan,
 			wg:                              wg,
 		},
-		routeManager: routemanager.NewController(wg, true, 2*time.Minute),
+		routeManager: routemanager.NewController(),
 	}
 }
 
@@ -632,7 +632,7 @@ func (nc *DefaultNodeNetworkController) Start(ctx context.Context) error {
 	if err := level.Set("5"); err != nil {
 		klog.Errorf("Setting klog \"loglevel\" to 5 failed, err: %v", err)
 	}
-	go nc.routeManager.Run(ctx.Done())
+	go nc.routeManager.Run(nc.stopChan, 4*time.Minute)
 
 	if node, err = nc.Kube.GetNode(nc.name); err != nil {
 		return fmt.Errorf("error retrieving node %s: %v", nc.name, err)
@@ -946,7 +946,9 @@ func (nc *DefaultNodeNetworkController) Start(ctx context.Context) error {
 			return fmt.Errorf("failed to create egress IP controller: %v", err)
 		}
 		nc.wg.Add(1)
-		c.Run(nc.stopChan, nc.wg)
+		if err = c.Run(nc.stopChan, nc.wg); err != nil {
+			return fmt.Errorf("failed to run egress IP controller: %v", err)
+		}
 	}
 
 	nc.wg.Add(1)

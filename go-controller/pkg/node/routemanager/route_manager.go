@@ -3,6 +3,7 @@ package routemanager
 import (
 	"fmt"
 	"net"
+	"reflect"
 	"time"
 
 	"github.com/vishvananda/netlink"
@@ -12,42 +13,35 @@ import (
 )
 
 type Controller struct {
-	// log all route netlink events received
-	logRouteChanges bool
-	// period for which we want to check that the routes we manage are applied. This is needed for the rare case
-	// we miss a route event.
-	syncPeriod time.Duration
+	// netlinkOps is used to swap netlink lib with a mock lib in order to allow consumers to test without creating netns
+	netlinkOps NetLinkOps
 	store      map[string]RoutesPerLink // key is link name
 	addRouteCh chan RoutesPerLink
 	delRouteCh chan RoutesPerLink
-	wg         *sync.WaitGroup
 }
 
 // NewController manages routes which include adding and deletion of routes. It also manages restoration of managed routes.
 // Begin managing routes by calling run() to start the manager.
 // Routes should be added via add(route) and deletion via del(route) functions only.
 // All other functions are used internally.
-func NewController(wg *sync.WaitGroup, logRouteChanges bool, syncPeriod time.Duration) *Controller {
+func NewController() *Controller {
 	return &Controller{
-		logRouteChanges: logRouteChanges,
-		syncPeriod:      syncPeriod,
-		store:           make(map[string]RoutesPerLink),
-		addRouteCh:      make(chan RoutesPerLink, 5),
-		delRouteCh:      make(chan RoutesPerLink, 5),
-		wg:              wg,
+		netlinkOps: &defaultNetLinkOps{},
+		store:      make(map[string]RoutesPerLink),
+		addRouteCh: make(chan RoutesPerLink, 5),
+		delRouteCh: make(chan RoutesPerLink, 5),
 	}
 }
 
-func (c *Controller) Run(stopCh <-chan struct{}) {
+func (c *Controller) Run(stopCh <-chan struct{}, syncPeriod time.Duration) {
 	var err error
 	var subscribed bool
 	var routeEventCh chan netlink.RouteUpdate
 	// netlink provides subscribing only to route events from the default table. Periodic sync will restore non-main table routes
 	// TODO: Double check this assumption
 	subscribed, routeEventCh = subscribeNetlinkRouteEvents(stopCh)
-	ticker := time.NewTicker(c.syncPeriod)
+	ticker := time.NewTicker(syncPeriod)
 	defer ticker.Stop()
-	defer c.wg.Done()
 
 	for {
 		select {
@@ -111,7 +105,7 @@ func (c *Controller) delRoutesPerLink(rl RoutesPerLink) error {
 	}
 	var deletedRoutes []Route
 	for _, r := range rl.Routes {
-		if err := c.netlinkDelRoute(rl.Link, r.Subnet, rl.Table); err != nil {
+		if err := c.netlinkDelRoute(rl.Link, r.Subnet, r.Table); err != nil {
 			return err
 		}
 		deletedRoutes = append(deletedRoutes, r)
@@ -123,11 +117,12 @@ func (c *Controller) delRoutesPerLink(rl RoutesPerLink) error {
 	}
 	routesPerLinkFound, ok := c.store[infName]
 	if !ok {
-		routesPerLinkFound = RoutesPerLink{rl.Link, rl.Table, []Route{}}
+		routesPerLinkFound = RoutesPerLink{rl.Link, []Route{}}
 	}
 	if len(deletedRoutes) > 0 {
 		routesPerLinkFound.delRoutes(deletedRoutes)
 	}
+	klog.Errorf("## after deleting found %v", routesPerLinkFound.Routes)
 	if len(routesPerLinkFound.Routes) == 0 {
 		delete(c.store, infName)
 	} else {
@@ -143,18 +138,19 @@ func (c *Controller) processNetlinkEvent(ru netlink.RouteUpdate) error {
 	if ru.Type == unix.RTM_NEWROUTE {
 		// An event resulting from `ip route change` will be seen as type RTM_NEWROUTE event and therefore this function will only
 		// log the changes and not attempt to restore the change. This will be accomplished by the sync function.
-		if c.logRouteChanges {
-			klog.Infof("Route Manager: netlink route addition event: %q", ru.String())
-		}
+		klog.Infof("Route Manager: netlink route addition event: %q", ru.String())
 		return nil
 	}
 	if ru.Type != unix.RTM_DELROUTE {
 		return nil
 	}
-	if c.logRouteChanges {
-		klog.Infof("Route Manager: netlink route deletion event: %q", ru.String())
+
+	klog.Infof("Route Manager: netlink route deletion event: %q", ru.String())
+	link, err := c.netlinkOps.LinkByIndex(ru.LinkIndex)
+	if err != nil {
+		return fmt.Errorf("failed to get link by index %d for netlink route update event (%s): %v", ru.LinkIndex, ru.String(), err)
 	}
-	rlEvent, err := convertRouteUpdateToRoutesPerLink(ru)
+	rlEvent, err := convertRouteUpdateToRoutesPerLink(link, ru)
 	if err != nil {
 		return fmt.Errorf("failed to convert netlink event to routesPerLink: %v", err)
 	}
@@ -189,28 +185,56 @@ func (c *Controller) processNetlinkEvent(ru netlink.RouteUpdate) error {
 
 func (c *Controller) applyRoutesPerLink(rl RoutesPerLink) error {
 	for _, r := range rl.Routes {
-		if err := c.applyRoute(rl.Link, r.GwIP, r.Subnet, r.MTU, r.SrcIP, rl.Table); err != nil {
+		if err := c.applyRoute(rl.Link, r.GwIP, r.Subnet, r.MTU, r.SrcIP, r.Table); err != nil {
 			return fmt.Errorf("failed to apply route (%s) because of error: %v", r.string(), err)
 		}
 	}
 	return nil
 }
 
+var _, defaultRouteIPNet, _ = net.ParseCIDR("0.0.0.0/0")
+
 func (c *Controller) applyRoute(link netlink.Link, gwIP net.IP, subnet *net.IPNet, mtu int, src net.IP, table int) error {
-	filterRoute, filterMask := filterRouteByDstAndTable(link, subnet, table)
-	nlRoutes, err := netlink.RouteListFiltered(getNetlinkIPFamily(gwIP), filterRoute, filterMask)
+	klog.Errorf("## applying route with subnet %v", subnet)
+	klog.Infof("### SUBNET %+v", subnet.String())
+	var filterRoute *netlink.Route
+	var filterMask uint64
+	// netlink library contains an issue where we cannot filter by a default route with dst 0.0.0.0/0 because netlink library represents
+	// a default route with dst is nil therefore filter by table only
+	isDefaultRoute := subnet != nil && subnet.String() == defaultRouteIPNet.String()
+	if isDefaultRoute {
+		filterRoute, filterMask = filterRouteByTable(link.Attrs().Index, table)
+	} else {
+		filterRoute, filterMask = filterRouteByDstAndTable(link.Attrs().Index, subnet, table)
+	}
+
+	nlRoutes, err := c.netlinkOps.RouteListFiltered(getNetlinkIPFamily(subnet), filterRoute, filterMask)
 	if err != nil {
 		return fmt.Errorf("failed to list filtered routes: %v", err)
 	}
 	if len(nlRoutes) == 0 {
+		klog.Errorf("## failed to find any routes on link %s", link.Attrs().Name)
 		return c.netlinkAddRoute(link, gwIP, subnet, mtu, src, table)
+	}
+	// remove when netlink library is fixed
+	if isDefaultRoute {
+		temp := nlRoutes[:0]
+		for _, nlRoute := range nlRoutes {
+			if nlRoute.Dst == nil && nlRoute.Src == nil && nlRoute.Gw == nil {
+				temp = append(temp, nlRoute)
+			}
+		}
+		nlRoutes = temp
+	}
+	if len(nlRoutes) > 1 {
+		return fmt.Errorf("unexpected number of routes after filtering. Expecting one route but found: %+v", nlRoutes)
 	}
 	netlinkRoute := &nlRoutes[0]
 	if netlinkRoute.MTU != mtu || !src.Equal(netlinkRoute.Src) || !gwIP.Equal(netlinkRoute.Gw) {
 		netlinkRoute.MTU = mtu
 		netlinkRoute.Src = src
 		netlinkRoute.Gw = gwIP
-		err = netlink.RouteReplace(netlinkRoute)
+		err = c.netlinkOps.RouteReplace(netlinkRoute)
 		if err != nil {
 			return fmt.Errorf("failed to replace route for subnet %s via gateway %s with mtu %d: %v",
 				subnet.String(), gwIP.String(), mtu, err)
@@ -233,31 +257,41 @@ func (c *Controller) netlinkAddRoute(link netlink.Link, gwIP net.IP, subnet *net
 	if mtu != 0 {
 		newNlRoute.MTU = mtu
 	}
-	err := netlink.RouteAdd(newNlRoute)
+	err := c.netlinkOps.RouteAdd(newNlRoute)
 	if err != nil {
-		return fmt.Errorf("failed to add route (%s): %v", newNlRoute.String(), err)
+		// TODO: we should return err eventually once netlink fixed
+		return fmt.Errorf("failed to add route (gw: %v, subnet %v, mtu %d, src IP %v): %v", gwIP, subnet, mtu, srcIP, err)
 	}
 	return nil
 }
 
 func (c *Controller) netlinkDelRoute(link netlink.Link, subnet *net.IPNet, table int) error {
 	// List routes for the link in the default routing table
-	filter, mask := filterRouteByTable(link, table)
-	nlRoutes, err := netlink.RouteListFiltered(netlink.FAMILY_ALL, filter, mask)
+	filter, mask := filterRouteByTable(link.Attrs().Index, table)
+
+	nlRoutes, err := c.netlinkOps.RouteListFiltered(netlink.FAMILY_ALL, filter, mask)
 	if err != nil {
 		return fmt.Errorf("failed to get routes for link %s: %v", link.Attrs().Name, err)
 	}
+	klog.Errorf("## netlinkDel: subnet %+v", subnet)
 	for _, nlRoute := range nlRoutes {
+		klog.Infof("## netlinkDel: in a loop with %+v", nlRoute)
+		klog.Infof("#### also its dst is %v", nlRoute.Dst)
 		deleteRoute := false
 		// Delete if subnet is nil and netlink route dst is nil or if they are equal
 		if subnet == nil {
 			deleteRoute = nlRoute.Dst == nil
 		} else if nlRoute.Dst != nil {
 			deleteRoute = nlRoute.Dst.String() == subnet.String()
+			// HACK: bug in netlink which doesnt show default as destination
+		} else if nlRoute.Dst == nil && subnet.String() == "0.0.0.0/0" {
+			_, ipNet, _ := net.ParseCIDR("0.0.0.0/0")
+			nlRoute.Dst = ipNet
+			deleteRoute = true
 		}
 
 		if deleteRoute {
-			err = netlink.RouteDel(&nlRoute)
+			err = c.netlinkOps.RouteDel(&nlRoute)
 			if err != nil {
 				dstValue := "default"
 				if nlRoute.Dst != nil {
@@ -308,50 +342,53 @@ func (c *Controller) addRoutesPerLinkStore(rl RoutesPerLink) error {
 // routes for this link are preserved. sync only inspects routes for links which we managed and ignore routes for non-managed links.
 func (c *Controller) sync() {
 	for infName, rl := range c.store {
-		filterRoute, filterMask := filterRouteByTable(rl.Link, rl.Table)
-		activeNlRoutes, err := netlink.RouteListFiltered(netlink.FAMILY_ALL, filterRoute, filterMask)
-		if err != nil {
-			klog.Errorf("Route Manager: failed to list routes for link %q usin filter route (%s) and filter mask %d: %w",
-				filterRoute.String(), filterMask, infName, err)
-			continue
-		}
-		var activeRoutes []Route
-		for _, activeNlRoute := range activeNlRoutes {
-			activeRoute, err := convertNetlinkRouteToRoutesPerLink(activeNlRoute)
+		for _, route := range rl.Routes {
+			filterRoute, filterMask := filterRouteByTable(rl.Link.Attrs().Index, route.Table)
+			activeNlRoutes, err := c.netlinkOps.RouteListFiltered(netlink.FAMILY_ALL, filterRoute, filterMask)
 			if err != nil {
-				klog.Errorf("Route Manager: failed to convert netlink route (%s) to route: %v",
-					activeRoute.String(), err)
+				klog.Errorf("Route Manager: failed to list routes for link %q usin filter route (%s) and filter mask %d: %w",
+					filterRoute.String(), filterMask, infName, err)
 				continue
 			}
-			activeRoutes = append(activeRoutes, activeRoute.Routes...)
-		}
-		var syncNeeded bool
-		var syncReason string
-		for _, expectedRoute := range rl.Routes {
-			var found bool
-			for _, activeRoute := range activeRoutes {
-				if activeRoute.Equal(expectedRoute) {
-					found = true
+			klog.Infof("## Routes for link %s: %v", infName, activeNlRoutes)
+			var activeRoutes []Route
+			for _, activeNlRoute := range activeNlRoutes {
+				activeRoute := ConvertNetlinkRouteToRoute(activeNlRoute)
+				activeRoutes = append(activeRoutes, activeRoute)
+			}
+			var syncNeeded bool
+			var syncReason string
+			for _, expectedRoute := range rl.Routes {
+				var found bool
+				for _, activeRoute := range activeRoutes {
+					if activeRoute.Equal(expectedRoute) {
+						found = true
+					}
+				}
+				if !found {
+					syncReason = fmt.Sprintf("failed to find route: %s", expectedRoute.string())
+					syncNeeded = true
+					break
 				}
 			}
-			if !found {
-				syncReason = fmt.Sprintf("failed to find route: %s", expectedRoute.string())
-				syncNeeded = true
-				break
-			}
-		}
-		if syncNeeded {
-			klog.Infof("Route Manager: sync required for routes associated with link %q. Reason: %s", infName, syncReason)
-			if err = c.applyRoutesPerLink(rl); err != nil {
-				klog.Errorf("Route Manager: sync failed to apply route (%s): %v", rl.String(), err)
+			if syncNeeded {
+				if err := c.applyRoute(rl.Link, route.GwIP, route.Subnet, route.MTU, route.SrcIP, route.Table); err != nil {
+					klog.Errorf("Route Manager: failed to apply route because %s (%s): %v", syncReason, route.string(), err)
+				}
 			}
 		}
 	}
 }
 
+// SetNetLinkOpMockInst method would be used by unit tests in other packages
+// Used only for testing when we do not wish to create network namespaces and a subset of consumers of route manager
+// do not use network namespaces
+func (c *Controller) SetNetLinkOpMockInst(mockInst NetLinkOps) {
+	c.netlinkOps = mockInst
+}
+
 type RoutesPerLink struct {
 	Link   netlink.Link
-	Table  int
 	Routes []Route
 }
 
@@ -362,14 +399,15 @@ func (rl RoutesPerLink) validate() error {
 	if len(rl.Routes) == 0 {
 		return fmt.Errorf("route must have a least one route entry")
 	}
-	if rl.Table >= 256 {
-		return fmt.Errorf("max number of route tables is 256 - blocking route request (%s)", rl.String())
-	}
+	//if rl.Table >= 256 {
+	//	return fmt.Errorf("max number of route tables is 256 - blocking route request (%s)", rl.String())
+	//}
+
 	for _, r := range rl.Routes {
+		klog.Infof("## validing route per link %s: %+q", rl.Link.Attrs().Name, r.Subnet)
 		if r.Subnet == nil || r.Subnet.String() == "<nil>" {
 			return fmt.Errorf("invalid subnet for route entry")
 		}
-
 	}
 	return nil
 }
@@ -382,7 +420,7 @@ func (rl RoutesPerLink) getLinkName() (string, error) {
 }
 
 func (rl RoutesPerLink) String() string {
-	routes := fmt.Sprintf("Table %d", rl.Table)
+	var routes string
 	for i, r := range rl.Routes {
 		routes = fmt.Sprintf("%s Route %d: %q", routes, i+1, r.string())
 	}
@@ -413,14 +451,26 @@ type Route struct {
 	Subnet *net.IPNet
 	MTU    int
 	SrcIP  net.IP
+	Table  int
 }
 
 func (r Route) Equal(r2 Route) bool {
+	if r.Table != r2.Table {
+		return false
+	}
 	if r.MTU != r2.MTU {
 		return false
 	}
-	if r.Subnet.String() != r2.Subnet.String() {
+	if r.Subnet != nil && r2.Subnet == nil {
 		return false
+	} else if r.Subnet == nil && r2.Subnet != nil {
+		return false
+	} else if r.Subnet == nil && r2.Subnet == nil {
+
+	} else if r.Subnet != nil && r2.Subnet != nil {
+		if r.Subnet.String() != r2.Subnet.String() {
+			return false
+		}
 	}
 	if r.GwIP.String() != r2.GwIP.String() {
 		return false
@@ -432,9 +482,9 @@ func (r Route) Equal(r2 Route) bool {
 }
 
 func (r Route) string() string {
-	var s string
+	s := fmt.Sprintf("Table %d", r.Table)
 	if r.Subnet != nil {
-		s = fmt.Sprintf("Subnet: %s", r.Subnet.String())
+		s = fmt.Sprintf("%s Subnet: %s", s, r.Subnet.String())
 	}
 	if r.MTU != 0 {
 		s = fmt.Sprintf("%s MTU: %d ", s, r.MTU)
@@ -454,69 +504,73 @@ func ConvertNetlinkRouteToRoute(nlRoute netlink.Route) Route {
 		Subnet: nlRoute.Dst,
 		MTU:    nlRoute.MTU,
 		SrcIP:  nlRoute.Src,
+		Table:  nlRoute.Table,
 	}
 }
 
-func convertRouteUpdateToRoutesPerLink(ru netlink.RouteUpdate) (RoutesPerLink, error) {
-	link, err := netlink.LinkByIndex(ru.LinkIndex)
-	if err != nil {
-		return RoutesPerLink{}, fmt.Errorf("failed to get link by index from route update: %v", ru)
+func convertRouteUpdateToRoutesPerLink(link netlink.Link, ru netlink.RouteUpdate) (RoutesPerLink, error) {
+	//TODO: remove when fix is in netlink
+	if ru.Dst == nil {
+		_, ipNet, _ := net.ParseCIDR("0.0.0.0/0")
+		ru.Dst = ipNet
 	}
 
 	return RoutesPerLink{
-		Link:  link,
-		Table: ru.Table,
+		Link: link,
 		Routes: []Route{
 			{
 				GwIP:   ru.Gw,
 				Subnet: ru.Dst,
 				MTU:    ru.MTU,
 				SrcIP:  ru.Src,
+				Table:  ru.Table,
 			},
 		},
 	}, nil
 }
 
-func convertNetlinkRouteToRoutesPerLink(nlRoute netlink.Route) (RoutesPerLink, error) {
-	link, err := netlink.LinkByIndex(nlRoute.LinkIndex)
-	if err != nil {
-		return RoutesPerLink{}, fmt.Errorf("failed to get link by index (%d) from route (%s): %w", nlRoute.LinkIndex,
-			nlRoute.String(), err)
+func convertNetlinkRouteToRoutesPerLink(link netlink.Link, nlRoute netlink.Route) (RoutesPerLink, error) {
+	if nlRoute.Dst == nil {
+		//TODO theres a bug in netlink which will be fixed with https://github.com/vishvananda/netlink/pull/852
+		// TODO fix this temp fix
+		klog.Errorf("## found no destination when trying to convert nl route: %s", nlRoute.String())
+		_, ipNet, _ := net.ParseCIDR("0.0.0.0/0")
+		nlRoute.Dst = ipNet
 	}
 	return RoutesPerLink{
-		Link:  link,
-		Table: nlRoute.Table,
+		Link: link,
 		Routes: []Route{
 			{
 				GwIP:   nlRoute.Gw,
 				Subnet: nlRoute.Dst,
 				MTU:    nlRoute.MTU,
 				SrcIP:  nlRoute.Src,
+				Table:  nlRoute.Table,
 			},
 		},
 	}, nil
 }
 
-func getNetlinkIPFamily(ip net.IP) int {
-	if utilnet.IsIPv6(ip) {
+func getNetlinkIPFamily(ipNet *net.IPNet) int {
+	if utilnet.IsIPv6(ipNet.IP) {
 		return netlink.FAMILY_V6
 	} else {
 		return netlink.FAMILY_V4
 	}
 }
 
-func filterRouteByDstAndTable(link netlink.Link, subnet *net.IPNet, table int) (*netlink.Route, uint64) {
+func filterRouteByDstAndTable(linkIndex int, subnet *net.IPNet, table int) (*netlink.Route, uint64) {
 	return &netlink.Route{
 			Dst:       subnet,
-			LinkIndex: link.Attrs().Index,
+			LinkIndex: linkIndex,
 			Table:     table,
 		},
 		netlink.RT_FILTER_DST | netlink.RT_FILTER_OIF | netlink.RT_FILTER_TABLE
 }
 
-func filterRouteByTable(link netlink.Link, table int) (*netlink.Route, uint64) {
+func filterRouteByTable(linkIndex, table int) (*netlink.Route, uint64) {
 	return &netlink.Route{
-			LinkIndex: link.Attrs().Index,
+			LinkIndex: linkIndex,
 			Table:     table,
 		},
 		netlink.RT_FILTER_OIF | netlink.RT_FILTER_TABLE
@@ -529,4 +583,50 @@ func subscribeNetlinkRouteEvents(stopCh <-chan struct{}) (bool, chan netlink.Rou
 		return false, routeEventCh
 	}
 	return true, routeEventCh
+}
+
+type NetLinkOps interface {
+	LinkList() ([]netlink.Link, error)
+	LinkByName(ifaceName string) (netlink.Link, error)
+	LinkByIndex(index int) (netlink.Link, error)
+	IsLinkNotFoundError(err error) bool
+	RouteDel(route *netlink.Route) error
+	RouteAdd(route *netlink.Route) error
+	RouteReplace(route *netlink.Route) error
+	RouteListFiltered(family int, filter *netlink.Route, filterMask uint64) ([]netlink.Route, error)
+}
+
+type defaultNetLinkOps struct {
+}
+
+func (defaultNetLinkOps) LinkList() ([]netlink.Link, error) {
+	return netlink.LinkList()
+}
+
+func (defaultNetLinkOps) LinkByName(ifaceName string) (netlink.Link, error) {
+	return netlink.LinkByName(ifaceName)
+}
+
+func (defaultNetLinkOps) LinkByIndex(index int) (netlink.Link, error) {
+	return netlink.LinkByIndex(index)
+}
+
+func (defaultNetLinkOps) IsLinkNotFoundError(err error) bool {
+	return reflect.TypeOf(err) == reflect.TypeOf(netlink.LinkNotFoundError{})
+}
+
+func (defaultNetLinkOps) RouteDel(route *netlink.Route) error {
+	return netlink.RouteDel(route)
+}
+
+func (defaultNetLinkOps) RouteAdd(route *netlink.Route) error {
+	return netlink.RouteAdd(route)
+}
+
+func (defaultNetLinkOps) RouteReplace(route *netlink.Route) error {
+	return netlink.RouteReplace(route)
+}
+
+func (defaultNetLinkOps) RouteListFiltered(family int, filter *netlink.Route, filterMask uint64) ([]netlink.Route, error) {
+	return netlink.RouteListFiltered(family, filter, filterMask)
 }

@@ -5,6 +5,7 @@ package node
 
 import (
 	"fmt"
+	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/node/linkmanager"
 	"net"
 	"sync"
 	"time"
@@ -36,17 +37,22 @@ type addressManager struct {
 
 	OnChanged func()
 	sync.Mutex
+	// flags to detect which IP family(s) we support
+	v4 bool
+	v6 bool
 }
 
+const skipBridges = false
+
 // initializes a new address manager which will hold all the IPs on a node
-func newAddressManager(nodeName string, k kube.Interface, config *managementPortConfig, watchFactory factory.NodeWatchFactory, gwBridge *bridgeConfiguration) *addressManager {
-	return newAddressManagerInternal(nodeName, k, config, watchFactory, gwBridge, true)
+func newAddressManager(nodeName string, k kube.Interface, config *managementPortConfig, watchFactory factory.NodeWatchFactory, gwBridge *bridgeConfiguration, v4, v6 bool) *addressManager {
+	return newAddressManagerInternal(nodeName, k, config, watchFactory, gwBridge, true, v4, v6)
 }
 
 // newAddressManagerInternal creates a new address manager; this function is
 // only expose for testcases to disable netlink subscription to ensure
 // reproducibility of unit tests.
-func newAddressManagerInternal(nodeName string, k kube.Interface, config *managementPortConfig, watchFactory factory.NodeWatchFactory, gwBridge *bridgeConfiguration, useNetlink bool) *addressManager {
+func newAddressManagerInternal(nodeName string, k kube.Interface, config *managementPortConfig, watchFactory factory.NodeWatchFactory, gwBridge *bridgeConfiguration, useNetlink, v4, v6 bool) *addressManager {
 	mgr := &addressManager{
 		nodeName:       nodeName,
 		watchFactory:   watchFactory,
@@ -55,6 +61,8 @@ func newAddressManagerInternal(nodeName string, k kube.Interface, config *manage
 		gatewayBridge:  gwBridge,
 		OnChanged:      func() {},
 		useNetlink:     useNetlink,
+		v4:             v4,
+		v6:             v6,
 	}
 	mgr.nodeAnnotator = kube.NewNodeAnnotator(k, nodeName)
 	mgr.sync()
@@ -67,7 +75,7 @@ func (c *addressManager) addAddr(ipnet net.IPNet) bool {
 	c.Lock()
 	defer c.Unlock()
 	if !c.addresses.Has(ipnet.String()) && c.isValidNodeIP(ipnet.IP) {
-		klog.Infof("Adding IP: %s, to node IP manager", ipnet)
+		klog.Infof("Adding IP: %s, to node IP manager", ipnet.String())
 		c.addresses.Insert(ipnet.String())
 		return true
 	}
@@ -80,8 +88,9 @@ func (c *addressManager) addAddr(ipnet net.IPNet) bool {
 func (c *addressManager) delAddr(ipnet net.IPNet) bool {
 	c.Lock()
 	defer c.Unlock()
+	klog.Errorf("## node ip: about to remove %s and does address contain it %v and is it valid %v", ipnet.String(), c.addresses.Has(ipnet.String()), c.isValidNodeIP(ipnet.IP))
 	if c.addresses.Has(ipnet.String()) && c.isValidNodeIP(ipnet.IP) {
-		klog.Infof("Removing IP: %s, from node IP manager", ipnet)
+		klog.Errorf("Removing IP: %s, from node IP manager", ipnet.String())
 		c.addresses.Delete(ipnet.String())
 		return true
 	}
@@ -145,10 +154,15 @@ func (c *addressManager) runInternal(stopChan <-chan struct{}, doneWg *sync.Wait
 		klog.Fatalf("Could not add node event handler while starting address manager %v", err)
 	}
 
+	c.refreshAddresses()
+	if err = c.updateNodeAddressAnnotations(); err != nil {
+		klog.Errorf("Address manager failed to set node annotation. It will be retried: %v", err)
+	}
+	c.OnChanged()
+
 	doneWg.Add(1)
 	go func() {
 		defer doneWg.Done()
-
 		addressSyncTimer := time.NewTicker(30 * time.Second)
 		defer addressSyncTimer.Stop()
 
@@ -159,30 +173,18 @@ func (c *addressManager) runInternal(stopChan <-chan struct{}, doneWg *sync.Wait
 
 		for {
 			select {
-			case a, ok := <-addrChan:
+			case _, ok := <-addrChan:
+				klog.Errorf("### NODE IP HANDER ADDR CN FIRED WITH OK CHAN %v", ok)
 				addressSyncTimer.Reset(30 * time.Second)
 				if !ok {
+					klog.Errorf("### !! NOEIP HANDER: ADDR CHAN CLOSED EWW")
 					if subscribed, addrChan, err = subscribe(); err != nil {
 						klog.Error("Error during netlink re-subscribe due to channel closing for IP Manager: %v", err)
 					}
+					klog.Errorf("### NOEIP HANDER: SHOULD BE RESUBBED")
 					continue
 				}
-				addrChanged := false
-				if a.NewAddr {
-					addrChanged = c.addAddr(a.LinkAddress)
-				} else {
-					addrChanged = c.delAddr(a.LinkAddress)
-				}
-
-				c.handleNodePrimaryAddrChange()
-				if addrChanged || !c.doesNodeHostAddressesMatch() {
-					klog.Infof("Host addresses changed to %v. Updating node address annotation.", c.addresses)
-					err := c.updateNodeAddressAnnotations()
-					if err != nil {
-						klog.Errorf("Address Manager failed to update node address annotations: %v", err)
-					}
-					c.OnChanged()
-				}
+				c.sync()
 			case <-addressSyncTimer.C:
 				if subscribed {
 					klog.V(5).Info("Node IP manager calling sync() explicitly")
@@ -199,6 +201,92 @@ func (c *addressManager) runInternal(stopChan <-chan struct{}, doneWg *sync.Wait
 	}()
 
 	klog.Info("Node IP manager is running")
+}
+
+func isSupportedLinkType(linkType string) bool {
+	// vlan | veth | vcan | dummy | ifb | macvlan | macvtap |
+	// bridge | bond | ipoib | ip6tnl | ipip | sit | vxlan |
+	// gre | gretap | ip6gre | ip6gretap | vti | vti6 | nlmon |
+	// bond_slave | ipvlan | xfrm | device
+	switch linkType {
+	case "vlan", "dummy", "bond", "device":
+		return true
+	default:
+		return false
+	}
+}
+
+func (c *addressManager) refreshAddresses() {
+	// list all address on the node excluding:
+	// 1. Links that are down
+	// 2. Loopback, slave or bridge type interfaces
+	// 3. Scope of address must be global / universe
+	// 4. Any ovn kube managed addresses we wish to filter automatically - currently only egress IP, and it uses node name as label.
+	// Get node information
+	node, err := c.watchFactory.GetNode(c.nodeName)
+	if err != nil {
+		klog.Errorf("Node IP handler: failed to get node from watcher: %v", err)
+		return
+	}
+	eIPConfig, err := util.ParseNodePrimaryIfAddr(node)
+	if err != nil {
+		klog.Errorf("Node IP hand;er: failed to get node primary interface addresses: %v", err)
+		return
+	}
+
+	addressesAdded := sets.New[string]()
+	if c.v4 {
+		if eIPConfig != nil && eIPConfig.V4.Net != nil {
+			ipNet := *eIPConfig.V4.Net
+			ipNet.IP = eIPConfig.V4.IP
+			c.addAddr(ipNet)
+			addressesAdded.Insert(ipNet.String())
+		}
+
+	}
+	if c.v6 {
+		if eIPConfig != nil && eIPConfig.V6.Net != nil {
+			ipNet := *eIPConfig.V6.Net
+			ipNet.IP = eIPConfig.V6.IP
+			c.addAddr(ipNet)
+			addressesAdded.Insert(ipNet.String())
+		}
+	}
+	links, err := netlink.LinkList()
+	if err != nil {
+		klog.Errorf("Node IP Handler: failed to list address on node: %v", err)
+	}
+	for _, link := range links {
+		klog.Infof("## considering %s and type %s", link.Attrs().Name, link.Type())
+		if supported := isSupportedLinkType(link.Type()); !supported {
+			klog.Infof("##### skipping because link %s isnt supported of type %s", link.Attrs().Name, link.Type())
+			continue
+		}
+		addresses, err := linkmanager.GetExternallyAvailableNetlinkLinkAddresses(link, c.v4, c.v6, skipBridges)
+		if err != nil {
+			klog.Errorf("Node IP handler: failed to get IP addresses from link %s: %v", link.Attrs().Name, err)
+			continue
+		}
+		for _, address := range addresses {
+			// skip custom IPs added by link manager. They are labeled with a known label
+			if address.Label == linkmanager.GetAssignedAddressLabel(link.Attrs().Name) {
+				continue
+			}
+			klog.Infof("## NODE IP adding link %s addr %s", link.Attrs().Name, address.String())
+			c.addAddr(*address.IPNet)
+			addressesAdded.Insert(address.IPNet.String())
+		}
+	}
+	// remove any addresses that aren't seen anymore
+	staleAddresses := c.addresses.Difference(addressesAdded)
+	klog.Errorf("NODE IP Stale addresses: %v", staleAddresses)
+	for _, staleAddress := range staleAddresses.UnsortedList() {
+		ip, ipNet, _ := net.ParseCIDR(staleAddress)
+		ipNet.IP = ip
+		klog.Errorf("## NODE IP deleting stale %s", staleAddress)
+		c.delAddr(*ipNet)
+	}
+	klog.Errorf("## node IP after sync addresses is %v", c.addresses.UnsortedList())
 }
 
 // updates OVN's EncapIP if the node IP changed
@@ -265,21 +353,9 @@ func (c *addressManager) updateNodeAddressAnnotations() error {
 	return nil
 }
 
-func (c *addressManager) assignAddresses(nodeHostAddresses sets.Set[string]) bool {
-	c.Lock()
-	defer c.Unlock()
-
-	if nodeHostAddresses.Equal(c.addresses) {
-		return false
-	}
-	c.addresses = nodeHostAddresses
-	return true
-}
-
 func (c *addressManager) doesNodeHostAddressesMatch() bool {
 	c.Lock()
 	defer c.Unlock()
-
 	node, err := c.watchFactory.GetNode(c.nodeName)
 	if err != nil {
 		klog.Errorf("Unable to get node from informer")
@@ -351,7 +427,7 @@ func (c *addressManager) updateOVNEncapIPAndReconnect() {
 }
 
 // detects if the IP is valid for a node
-// excludes things like local IPs, mgmt port ip, special masquerade IP
+// excludes things like local IPs, mgmt port ip, special masquerade IP and /32 or /128 length addresses
 func (c *addressManager) isValidNodeIP(addr net.IP) bool {
 	if addr == nil {
 		return false
@@ -362,12 +438,11 @@ func (c *addressManager) isValidNodeIP(addr net.IP) bool {
 	if addr.IsLoopback() {
 		return false
 	}
-
 	if utilnet.IsIPv4(addr) {
 		if c.mgmtPortConfig.ipv4 != nil && c.mgmtPortConfig.ipv4.ifAddr.IP.Equal(addr) {
 			return false
 		}
-	} else if utilnet.IsIPv6(addr) {
+	} else {
 		if c.mgmtPortConfig.ipv6 != nil && c.mgmtPortConfig.ipv6.ifAddr.IP.Equal(addr) {
 			return false
 		}
@@ -381,39 +456,15 @@ func (c *addressManager) isValidNodeIP(addr net.IP) bool {
 }
 
 func (c *addressManager) sync() {
-	var err error
-	var addrs []net.Addr
-
 	if c.useNetlink {
-		addrs, err = net.InterfaceAddrs()
-		if err != nil {
-			klog.Errorf("Failed to sync Node IP Manager: unable list all IPs on the node, error: %v", err)
-			return
-		}
+		c.refreshAddresses()
 	}
-
-	currAddresses := sets.New[string]()
-	for _, addr := range addrs {
-		ip, ipnet, err := net.ParseCIDR(addr.String())
-		if err != nil {
-			klog.Errorf("Invalid IP address found on host: %s", addr.String())
-			continue
-		}
-		if !c.isValidNodeIP(ip) {
-			klog.V(5).Infof("Skipping non-useable IP address for host: %s", ip.String())
-			continue
-		}
-		netAddr := &net.IPNet{IP: ip, Mask: ipnet.Mask}
-		currAddresses.Insert(netAddr.String())
-	}
-
-	addrChanged := c.assignAddresses(currAddresses)
 	c.handleNodePrimaryAddrChange()
-	if addrChanged || !c.doesNodeHostAddressesMatch() {
-		klog.Infof("Node address changed to %v. Updating annotations.", currAddresses)
-		err := c.updateNodeAddressAnnotations()
-		if err != nil {
+	if !c.doesNodeHostAddressesMatch() {
+		klog.Infof("Node address changed. Updating annotations.")
+		if err := c.updateNodeAddressAnnotations(); err != nil {
 			klog.Errorf("Address Manager failed to update node address annotations: %v", err)
 		}
+		c.OnChanged()
 	}
 }

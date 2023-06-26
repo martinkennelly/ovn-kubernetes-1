@@ -52,6 +52,7 @@ func (oc *DefaultNetworkController) gatewayCleanup(nodeName string) error {
 	logicalRouterPort := nbdb.LogicalRouterPort{
 		Name: types.GWRouterToJoinSwitchPrefix + gatewayRouter,
 	}
+
 	err = libovsdbops.DeleteLogicalRouterPorts(oc.nbClient, &logicalRouter, &logicalRouterPort)
 	if err != nil {
 		return fmt.Errorf("failed to delete port %s on router %s: %v", logicalRouterPort.Name, gatewayRouter, err)
@@ -63,6 +64,19 @@ func (oc *DefaultNetworkController) gatewayCleanup(nodeName string) error {
 		return fmt.Errorf("failed to delete gateway router %s: %v", gatewayRouter, err)
 	}
 
+	// HACK - start hack: need to update libovsdb. Test server doesnt remove ext switch port even when we remove the switch. Test server bug.
+	ls := &nbdb.LogicalSwitch{Name: types.ExternalSwitchPrefix + nodeName}
+	ls, err = libovsdbops.GetLogicalSwitch(oc.nbClient, ls)
+	if err != nil {
+		return fmt.Errorf("failed to get logical switch %v", err)
+	}
+	lsp2 := &nbdb.LogicalSwitchPort{Name: types.EXTSwitchToGWRouterPrefix + gatewayRouter}
+	err = libovsdbops.DeleteLogicalSwitchPorts(oc.nbClient, ls, lsp2)
+	if err != nil {
+		klog.Errorf("### failed to delete %s: %v", types.EXTSwitchToGWRouterPrefix+gatewayRouter, err)
+	}
+	// HACK - end hack
+
 	// Remove external switch
 	externalSwitch := types.ExternalSwitchPrefix + nodeName
 	err = libovsdbops.DeleteLogicalSwitch(oc.nbClient, externalSwitch)
@@ -70,13 +84,20 @@ func (oc *DefaultNetworkController) gatewayCleanup(nodeName string) error {
 		return fmt.Errorf("failed to delete external switch %s: %v", externalSwitch, err)
 	}
 
-	exGWexternalSwitch := types.EgressGWSwitchPrefix + types.ExternalSwitchPrefix + nodeName
-	err = libovsdbops.DeleteLogicalSwitch(oc.nbClient, exGWexternalSwitch)
-	if err != nil {
-		return fmt.Errorf("failed to delete external switch %s: %v", exGWexternalSwitch, err)
-	}
-
-	// This will cleanup the NodeSubnetPolicy in local and shared gateway modes. It will be a no-op for any other mode.
+	//exGWexternalSwitch := types.EgressGWSwitchPrefix + types.ExternalSwitchPrefix + nodeName
+	//err = libovsdbops.DeleteLogicalSwitch(oc.nbClient, exGWexternalSwitch)
+	//if err != nil {
+	//	return fmt.Errorf("failed to delete external switch %s: %v", exGWexternalSwitch, err)
+	//}
+	//
+	//exToRouterPort := nbdb.LogicalSwitchPort{Name: types.EXTSwitchToGWRouterPrefix + gatewayRouter}
+	//
+	//err = libovsdbops.DeleteLogicalSwitchPorts(oc.nbClient, exGWexternalSwitch, &exToRouterPort)
+	//if err != nil {
+	//	return fmt.Errorf("failed to delete external to router port: %v", err)
+	//}
+	//hack to remove LSP
+	//This will cleanup the NodeSubnetPolicy in local and shared gateway modes. It will be a no-op for any other mode.
 	oc.delPbrAndNatRules(nodeName, nil)
 	return nil
 }

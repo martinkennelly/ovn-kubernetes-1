@@ -1389,6 +1389,10 @@ var _ = ginkgo.Describe("Gateway Init Operations", func() {
 					UUID: types.OVNJoinSwitch + "-UUID",
 					Name: types.OVNJoinSwitch,
 				},
+				&nbdb.LogicalSwitch{
+					Name: types.EgressGWSwitchPrefix + types.ExternalSwitchPrefix + nodeName,
+					UUID: types.EgressGWSwitchPrefix + types.ExternalSwitchPrefix + nodeName + "-UUID",
+				},
 			}
 			gomega.Eventually(fakeOvn.nbClient).Should(libovsdbtest.HaveData(expectedDatabaseState))
 		})
@@ -1522,6 +1526,10 @@ var _ = ginkgo.Describe("Gateway Init Operations", func() {
 				&nbdb.LogicalSwitch{
 					UUID: types.OVNJoinSwitch + "-UUID",
 					Name: types.OVNJoinSwitch,
+				},
+				&nbdb.LogicalSwitch{
+					Name: types.EgressGWSwitchPrefix + types.ExternalSwitchPrefix + nodeName,
+					UUID: types.EgressGWSwitchPrefix + types.ExternalSwitchPrefix + nodeName + "-UUID",
 				},
 			}
 			gomega.Eventually(fakeOvn.nbClient).Should(libovsdbtest.HaveData(expectedDatabaseState))

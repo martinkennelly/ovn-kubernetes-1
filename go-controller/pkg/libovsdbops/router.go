@@ -3,6 +3,7 @@ package libovsdbops
 import (
 	"context"
 	"fmt"
+	"k8s.io/klog/v2"
 	"net"
 
 	libovsdbclient "github.com/ovn-org/libovsdb/client"
@@ -417,6 +418,7 @@ func deleteNextHopsFromLogicalRouterPolicyOps(nbClient libovsdbclient.Client, op
 
 	for i := range lrps {
 		lrp := lrps[i]
+		klog.Errorf("## deleteNextHopsFromLogicalRouterPolicyOps() next hop set is: %v and does it contain new next hops? %v", lrp.Nexthops, nextHopSet.HasAll(lrp.Nexthops...))
 		if nextHopSet.HasAll(lrp.Nexthops...) {
 			// if no next-hops remain in the policy, remove it alltogether
 			router.Policies = append(router.Policies, lrp.UUID)
@@ -427,6 +429,7 @@ func deleteNextHopsFromLogicalRouterPolicyOps(nbClient libovsdbclient.Client, op
 			}
 			opModels = append(opModels, opModel)
 		} else {
+			klog.Errorf(" #### holy shit it didnt detect multiple hops when it should have - heres the list of wanted next hops '%v' and heres the next hops on the lrp found %v ", nextHops, lrp.Nexthops)
 			// otherwise just remove the next-hops
 			lrp.Nexthops = nextHops
 			opModel := operationModel{

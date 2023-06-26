@@ -130,7 +130,11 @@ func GetNodeInternalAddrs(node *v1.Node) (net.IP, net.IP) {
 // GetNodeAddresses returns all of the node's IPv4 and/or IPv6 annotated
 // addresses as requested. Note that nodes not annotated will be ignored.
 func GetNodeAddresses(ipv4, ipv6 bool, nodes ...*v1.Node) (ipsv4 []net.IP, ipsv6 []net.IP, err error) {
-	allips := sets.Set[string]{}
+	klog.Errorf("## ensureDefaultNoRerouteNodePolicies -> GetNodeAddresses: found %d nodes", len(nodes))
+	for _, node := range nodes {
+		klog.Errorf("### ensureDefaultNoRerouteNodePolicies -> getaddress: node %s found", node.String())
+	}
+	allCIDRs := sets.Set[string]{}
 	for _, node := range nodes {
 		ips, err := ParseNodeHostAddresses(node)
 		if IsAnnotationNotSetError(err) {
@@ -139,18 +143,22 @@ func GetNodeAddresses(ipv4, ipv6 bool, nodes ...*v1.Node) (ipsv4 []net.IP, ipsv6
 		if err != nil {
 			return nil, nil, err
 		}
-		allips = allips.Insert(ips.UnsortedList()...)
+		allCIDRs = allCIDRs.Insert(ips.UnsortedList()...)
 	}
+	klog.Errorf("## ensureDefaultNoRerouteNodePolicies -> GetNodeAddresses: %v", allCIDRs)
 
-	for _, ip := range allips.UnsortedList() {
-		ip := utilnet.ParseIPSloppy(ip)
+	for _, cidr := range allCIDRs.UnsortedList() {
+		ip, _, err := net.ParseCIDR(cidr)
+		if err != nil {
+			klog.Errorf("Failed to get host-addresses")
+		}
 		if ipv4 && utilnet.IsIPv4(ip) {
 			ipsv4 = append(ipsv4, ip)
 		} else if ipv6 && utilnet.IsIPv6(ip) {
 			ipsv6 = append(ipsv6, ip)
 		}
 	}
-
+	klog.Errorf("## ensureDefaultNoRerouteNodePolicies -> GetNodeAddresses: IPV4 results: %v", ipsv4)
 	return
 }
 

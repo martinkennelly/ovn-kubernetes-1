@@ -36,7 +36,7 @@ func (h *egressIPClusterControllerEventHandler) AddResource(obj interface{}, fro
 		// annotate the node with the egressIPConfig, but that might have
 		// happened after we processed the ADD for that object, hence keep
 		// retrying for all UPDATEs.
-		if err := h.eIPC.initEgressIPAllocator(node); err != nil {
+		if err := h.eIPC.refreshEgressIPAllocatorForNode(node); err != nil {
 			klog.Warningf("Egress node initialization error: %v", err)
 		}
 		nodeEgressLabel := util.GetNodeEgressLabel()
@@ -85,7 +85,7 @@ func (h *egressIPClusterControllerEventHandler) UpdateResource(oldObj, newObj in
 		// annotate the node with the egressIPConfig, but that might have
 		// happened after we processed the ADD for that object, hence keep
 		// retrying for all UPDATEs.
-		if err := h.eIPC.initEgressIPAllocator(newNode); err != nil {
+		if err := h.eIPC.refreshEgressIPAllocatorForNode(newNode); err != nil {
 			klog.Warningf("Egress node initialization error: %v", err)
 		}
 		nodeEgressLabel := util.GetNodeEgressLabel()

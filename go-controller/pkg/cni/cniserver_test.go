@@ -18,11 +18,10 @@ import (
 
 	cnitypes "github.com/containernetworking/cni/pkg/types"
 	cni020 "github.com/containernetworking/cni/pkg/types/020"
-	"k8s.io/client-go/kubernetes/fake"
-	utiltesting "k8s.io/client-go/util/testing"
-
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/factory"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
+
+	"k8s.io/client-go/kubernetes/fake"
 )
 
 func clientDoCNI(t *testing.T, client *http.Client, req *Request) ([]byte, int) {
@@ -70,7 +69,7 @@ const (
 )
 
 func TestCNIServer(t *testing.T) {
-	tmpDir, err := utiltesting.MkTmpdir("cniserver")
+	tmpDir, err := mkTmpdir("cniserver")
 	if err != nil {
 		t.Fatalf("failed to create temp directory: %v", err)
 	}
@@ -249,4 +248,12 @@ func TestCNIServer(t *testing.T) {
 			}
 		}
 	}
+}
+
+func mkTmpdir(prefix string) (string, error) {
+	tmpDir, err := os.MkdirTemp(os.TempDir(), prefix)
+	if err != nil {
+		return "", err
+	}
+	return tmpDir, nil
 }

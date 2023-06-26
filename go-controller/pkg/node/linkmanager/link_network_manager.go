@@ -2,16 +2,18 @@ package linkmanager
 
 import (
 	"fmt"
+	"k8s.io/klog/v2"
+	"net/netip"
+	"os/exec"
+	"strings"
 	"sync"
 	"time"
-
-	"k8s.io/klog/v2"
 
 	"github.com/vishvananda/netlink"
 )
 
-// gather all interfaces data address + mask and offer this as a service
-// offer to take address and assign to interface. Ensure its there.
+// Gather all suitable interface address + network mask and offer this as a service.
+// Also offer address assignment to interfaces and ensure the state we want is maintained through a sync func
 
 type LinkAddress struct {
 	Link      netlink.Link
@@ -36,23 +38,21 @@ func NewController(name string, v4, v6 bool) *Controller {
 	}
 }
 
-func (c *Controller) Run(stopCh <-chan struct{}, doneWg *sync.WaitGroup) {
-	go func() {
-		defer doneWg.Done()
-		ticker := time.NewTicker(2 * time.Minute)
-		defer ticker.Stop()
+func (c *Controller) Run(stopCh <-chan struct{}, syncPeriod time.Duration) {
+	ticker := time.NewTicker(syncPeriod)
+	defer ticker.Stop()
 
-		for {
-			select {
-			case <-stopCh:
-				return
-			case <-ticker.C:
-				c.mu.Lock()
-				c.reconcile()
-				c.mu.Unlock()
-			}
+	for {
+		select {
+		case <-stopCh:
+			return
+		case <-ticker.C:
+			c.mu.Lock()
+			c.reconcile()
+			c.mu.Unlock()
 		}
-	}()
+	}
+
 }
 
 func (c *Controller) AddAddress(address netlink.Addr) error {
@@ -71,8 +71,8 @@ func (c *Controller) AddAddress(address netlink.Addr) error {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	// overwrite label to the name of this component in-order to aid address ownership
-	address.Label = c.name
+	// overwrite label to the name of this component in-order to aid address ownership. Label must start with link name.
+	address.Label = GetAssignedAddressLabel(link.Attrs().Name)
 	c.addAddressToStore(link.Attrs().Name, address)
 	c.reconcile()
 	return nil
@@ -112,7 +112,7 @@ func (c *Controller) reconcile() {
 	}
 	for _, link := range links {
 		// get all addresses associated with the link depending on which IP families we support
-		addressesFound, err := c.GetLinkAddressesByIPFamily(link)
+		addressesFound, err := getAllLinkAddressesByIPFamily(link, c.ipv4Enabled, c.ipv6Enabled)
 		if err != nil {
 			klog.Errorf("Link Network Manager: failed to get address from link %q", link.Attrs().Name)
 			continue
@@ -122,7 +122,7 @@ func (c *Controller) reconcile() {
 			// we dont managed this link, check we  used to manage it and if a stale address is present, delete it
 			for _, address := range addressesFound {
 				// we label any address we create, so if we aren't managed a link, we must remove any stale addresses
-				if address.Label == c.name {
+				if address.Label == GetAssignedAddressLabel(link.Attrs().Name) {
 					if err := netlink.AddrDel(link, &address); err != nil {
 						klog.Errorf("Link Network Manager: failed to delete address %q from link %q",
 							address.String(), link.Attrs().Name)
@@ -138,12 +138,15 @@ func (c *Controller) reconcile() {
 		for _, addrFound := range addressesFound {
 			if !containsAddress(addressesWanted, addrFound) {
 				// every address we added is labeled with a well-known label to ensure we clean any addresses we previously managed.
-				if addrFound.Label == c.name {
+				if addrFound.Label == GetAssignedAddressLabel(link.Attrs().Name) {
 					// delete an unmanaged address that we used to managed
 					if err = netlink.AddrDel(link, &addrFound); err != nil {
-						klog.Errorf("Link Network Manager: failed to delete stale address %q from link %q: %v",
+						klog.Errorf("Link manager: failed to delete stale address %q from link %q: %v",
 							addrFound, link.Attrs().Name, err)
+					} else {
+						klog.Infof("Link manager: deleted stale assigned address %s on link %s", addrFound.String(), link.Attrs().Name)
 					}
+
 				}
 			}
 		}
@@ -157,32 +160,27 @@ func (c *Controller) reconcile() {
 				}
 			}
 			if !exists {
+				// Use arping to try to update other hosts ARP caches, in case this IP was
+				// previously active on another node. (Based on code from "ifup".)
+				go func() {
+					out, err := exec.Command("/sbin/arping", "-q", "-A", "-c", "1", "-I", link.Attrs().Name, addressWanted.IP.String()).CombinedOutput()
+					if err != nil {
+						klog.Warningf("Failed to send ARP claim for IP %s: %v (exec command output: %q)", addressWanted.IP.String(), err, string(out))
+						return
+					}
+					time.Sleep(2 * time.Second)
+					_ = exec.Command("/sbin/arping", "-q", "-U", "-c", "1", "-I", link.Attrs().Name, addressWanted.IP.String()).Run()
+				}()
+
 				if err = netlink.AddrAdd(link, &addressWanted); err != nil {
-					klog.Errorf("Link Network Manager: failed to add address %q to link %q: %v",
+					klog.Errorf("Link manager: failed to add address %q to link %q: %v",
 						addressWanted.String(), link.Attrs().Name, err)
+				} else {
+					klog.Infof("Link manager completed adding address %s to link %s", addressWanted, link.Attrs().Name)
 				}
 			}
 		}
 	}
-}
-
-func (c *Controller) GetLinkAddressesByIPFamily(link netlink.Link) ([]netlink.Addr, error) {
-	links := make([]netlink.Addr, 0)
-	if c.ipv4Enabled {
-		linksFound, err := netlink.AddrList(link, netlink.FAMILY_V4)
-		if err != nil {
-			return links, fmt.Errorf("failed to list link addresses: %v", err)
-		}
-		links = linksFound
-	}
-	if c.ipv6Enabled {
-		linksFound, err := netlink.AddrList(link, netlink.FAMILY_V6)
-		if err != nil {
-			return links, fmt.Errorf("failed to list link addresses: %v", err)
-		}
-		links = append(links, linksFound...)
-	}
-	return links, nil
 }
 
 func (c *Controller) addAddressToStore(linkName string, newAddress netlink.Addr) {
@@ -217,6 +215,118 @@ func (c *Controller) delAddressFromStore(linkName string, address netlink.Addr) 
 		}
 	}
 	c.store[linkName] = temp
+}
+
+// GetAssignedAddressLabel returns the label that must be assigned to each egress IP address bound to an interface
+func GetAssignedAddressLabel(linkName string) string {
+	//TODO: undeterstand why label char limt is 15 and how can a label work with a long link name otherwise it may block eip assignment
+	return fmt.Sprintf("%sovn", linkName)
+}
+
+// GetExternallyAvailableNetlinkLinkAddresses gets all addresses assigned on a valid interface
+func GetExternallyAvailableNetlinkLinkAddresses(link netlink.Link, v4, v6, skipBridges bool) ([]netlink.Addr, error) {
+	validAddresses := make([]netlink.Addr, 0)
+	klog.Errorf("### link %s flags are: %s", link.Attrs().Name, link.Attrs().Flags.String())
+	flags := link.Attrs().Flags.String()
+	// exclude loopback interfaces
+	if strings.Contains(flags, "loopback") {
+		return validAddresses, nil
+	}
+	// exclude interfaces that aren't up
+	if !strings.Contains(flags, "up") {
+		return validAddresses, nil
+	}
+	klog.Errorf("## link %s master index %d and parent index %s", link.Attrs().Name, link.Attrs().MasterIndex, link.Attrs().ParentIndex)
+	// skip any devices which have an owner or parent
+	if skipBridges {
+		if link.Attrs().MasterIndex != 0 {
+			return validAddresses, nil
+		}
+	}
+	// ditto
+	if link.Attrs().ParentIndex != 0 {
+		return validAddresses, nil
+	}
+	linkAddresses, err := getAllLinkAddressesByIPFamily(link, v4, v6)
+	if err != nil {
+		return validAddresses, fmt.Errorf("failed to get all valid link addresses: %v", err)
+	}
+	for _, address := range linkAddresses {
+		// consider only GLOBAL scope addresses
+		if address.Scope != int(netlink.SCOPE_UNIVERSE) {
+			continue
+		}
+		klog.Errorf("## NODE EIP: adding address %v for link %s", address, link.Attrs().Name)
+		validAddresses = append(validAddresses, address)
+	}
+	return validAddresses, nil
+}
+
+func GetExternallyAvailableNetipAddresses(link netlink.Link, v4, v6, skipBridges bool) ([]netip.Prefix, error) {
+	validAddresses := make([]netip.Prefix, 0)
+	klog.Errorf("### link %s flags are: %s", link.Attrs().Name, link.Attrs().Flags.String())
+	flags := link.Attrs().Flags.String()
+	// exclude loopback interfaces
+	if strings.Contains(flags, "loopback") {
+		return validAddresses, nil
+	}
+	// exclude interfaces that aren't up
+	if !strings.Contains(flags, "up") {
+		return validAddresses, nil
+	}
+	klog.Errorf("## link %s master index %d and parent index %s", link.Attrs().Name, link.Attrs().MasterIndex, link.Attrs().ParentIndex)
+	// skip any devices which have an owner or parent
+	if skipBridges {
+		if link.Attrs().MasterIndex != 0 {
+			return validAddresses, nil
+		}
+	}
+	// ditto
+	if link.Attrs().ParentIndex != 0 {
+		return validAddresses, nil
+	}
+	linkAddresses, err := getAllLinkAddressesByIPFamily(link, v4, v6)
+	if err != nil {
+		return validAddresses, fmt.Errorf("failed to get all valid link addresses: %v", err)
+	}
+	for _, address := range linkAddresses {
+		// consider only GLOBAL scope addresses
+		if address.Scope != int(netlink.SCOPE_UNIVERSE) {
+			continue
+		}
+		// skip Egress IPs
+		if address.Label == GetAssignedAddressLabel(link.Attrs().Name) {
+			continue
+		}
+
+		klog.Errorf("## NODE EIP: adding address %v for link %s", address, link.Attrs().Name)
+		addr, err := netip.ParsePrefix(address.IPNet.String())
+		if err != nil {
+			klog.Errorf("Link Manager: unable to parse address %s on link %s: %v", address.String(), link.Attrs().Name, err)
+			continue
+		}
+		validAddresses = append(validAddresses, addr)
+	}
+	return validAddresses, nil
+}
+
+func getAllLinkAddressesByIPFamily(link netlink.Link, v4, v6 bool) ([]netlink.Addr, error) {
+	links := make([]netlink.Addr, 0)
+	if v4 {
+		linksFound, err := netlink.AddrList(link, netlink.FAMILY_V4)
+		if err != nil {
+			return links, fmt.Errorf("failed to list link addresses: %v", err)
+		}
+		links = linksFound
+	}
+	if v6 {
+		linksFound, err := netlink.AddrList(link, netlink.FAMILY_V6)
+		if err != nil {
+			return links, fmt.Errorf("failed to list link addresses: %v", err)
+		}
+		links = append(links, linksFound...)
+	}
+	return links, nil
 }
 
 func containsAddress(addresses []netlink.Addr, candidate netlink.Addr) bool {

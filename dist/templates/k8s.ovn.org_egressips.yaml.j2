@@ -168,16 +168,16 @@ spec:
                     egressIP:
                       description: Assigned egress IP
                       type: string
+                    network:
+                      description: Assigned network
+                      type: string
                     node:
                       description: Assigned node name
                       type: string
-                    routeViaHost:
-                      description: Route via host network or OVN
-                      type: boolean
                   required:
                   - egressIP
+                  - network
                   - node
-                  - routeViaHost
                   type: object
                 type: array
             required:

@@ -1703,7 +1703,7 @@ func newSharedGateway(nodeName string, subnets []*net.IPNet, gwNextHops []net.IP
 				}
 			}
 		}
-		gw.nodeIPManager = newAddressManager(nodeName, kube, cfg, watchFactory, gwBridge)
+		gw.nodeIPManager = newAddressManager(nodeName, kube, cfg, watchFactory, gwBridge, config.IPv4Mode, config.IPv6Mode)
 		nodeIPs := gw.nodeIPManager.ListAddresses()
 
 		if config.OvnKubeNode.Mode == types.NodeModeFull {

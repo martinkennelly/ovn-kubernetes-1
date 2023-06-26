@@ -12,6 +12,7 @@ require (
 	github.com/containernetworking/plugins v1.2.0
 	github.com/coreos/go-iptables v0.6.0
 	github.com/fsnotify/fsnotify v1.6.0
+	github.com/gaissmai/cidrtree v0.1.4
 	github.com/google/go-cmp v0.5.9
 	github.com/google/uuid v1.3.0
 	github.com/gorilla/mux v1.8.0
@@ -34,7 +35,7 @@ require (
 	github.com/spf13/afero v1.9.5
 	github.com/stretchr/testify v1.8.1
 	github.com/urfave/cli/v2 v2.2.0
-	github.com/vishvananda/netlink v1.2.1-beta.2.0.20230420174744-55c8b9515a01
+	github.com/vishvananda/netlink v1.2.1-beta.2.0.20230604041157-acdc658b8613
 	golang.org/x/net v0.10.0
 	golang.org/x/sync v0.2.0
 	golang.org/x/sys v0.8.0

@@ -169,7 +169,7 @@ func (f *FakeAddressSetFactory) expectAddressSetWithIPs(g gomega.Gomega, dbIDs *
 	if as6 != nil {
 		lenAddressSet = lenAddressSet + len(as6.ips)
 	}
-
+	klog.Errorf("### expectaddset: addresset len %d and expect ips %d", lenAddressSet, len(ips))
 	for _, ip := range ips {
 		if utilnet.IsIPv6(net.ParseIP(ip)) {
 			g.Expect(as6).NotTo(gomega.BeNil())
