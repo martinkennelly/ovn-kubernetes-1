@@ -5,12 +5,14 @@ import (
 	"fmt"
 	"math"
 	"net"
+	"net/netip"
 	"strconv"
 
 	corev1 "k8s.io/api/core/v1"
 	kapi "k8s.io/api/core/v1"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/sets"
+	utilnet "k8s.io/utils/net"
 
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/config"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/kube"
@@ -489,8 +491,8 @@ type ParsedIFAddr struct {
 }
 
 type ParsedNodeEgressIPConfiguration struct {
-	V4       ParsedIFAddr
-	V6       ParsedIFAddr
+	V4       []ParsedIFAddr
+	V6       []ParsedIFAddr
 	Capacity Capacity
 }
 
@@ -630,23 +632,22 @@ func ParseCloudEgressIPConfig(node *kapi.Node) (*ParsedNodeEgressIPConfiguration
 	if err != nil {
 		return nil, err
 	}
-	if nodeIfAddr.IPv4 != "" {
+	if nodeIfAddr.IPv4 != "" && len(parsedEgressIPConfig.V4) > 0 {
 		ipv4, _, err := net.ParseCIDR(nodeIfAddr.IPv4)
 		if err != nil {
 			return nil, err
 		}
-		parsedEgressIPConfig.V4.IP = ipv4
+		parsedEgressIPConfig.V4[0].IP = ipv4
 	}
-	if nodeIfAddr.IPv6 != "" {
+	if nodeIfAddr.IPv6 != "" && len(parsedEgressIPConfig.V6) > 0 {
 		ipv6, _, err := net.ParseCIDR(nodeIfAddr.IPv6)
 		if err != nil {
 			return nil, err
 		}
-		parsedEgressIPConfig.V6.IP = ipv6
+		parsedEgressIPConfig.V6[0].IP = ipv6
 	}
 
 	return parsedEgressIPConfig, nil
-
 }
 
 func parseNodeEgressIPConfig(egressIPConfig *nodeEgressIPConfiguration) (*ParsedNodeEgressIPConfiguration, error) {
@@ -658,20 +659,20 @@ func parseNodeEgressIPConfig(egressIPConfig *nodeEgressIPConfiguration) (*Parsed
 		if err != nil {
 			return nil, err
 		}
-		parsedEgressIPConfig.V4 = ParsedIFAddr{
+		parsedEgressIPConfig.V4 = append(parsedEgressIPConfig.V4, ParsedIFAddr{
 			IP:  ipv4,
 			Net: v4Subnet,
-		}
+		})
 	}
 	if egressIPConfig.IFAddr.IPv6 != "" {
 		ipv6, v6Subnet, err := net.ParseCIDR(egressIPConfig.IFAddr.IPv6)
 		if err != nil {
 			return nil, err
 		}
-		parsedEgressIPConfig.V6 = ParsedIFAddr{
+		parsedEgressIPConfig.V6 = append(parsedEgressIPConfig.V6, ParsedIFAddr{
 			IP:  ipv6,
 			Net: v6Subnet,
-		}
+		})
 	}
 	return parsedEgressIPConfig, nil
 }
@@ -703,6 +704,194 @@ func ParseNodeHostAddresses(node *kapi.Node) (sets.Set[string], error) {
 	}
 
 	return sets.New(cfg...), nil
+}
+
+func ParseNodeHostAddressesList(node *kapi.Node) ([]string, error) {
+	addrAnnotation, ok := node.Annotations[ovnNodeHostAddresses]
+	if !ok {
+		return nil, newAnnotationNotSetError("%s annotation not found for node %q", ovnNodeHostAddresses, node.Name)
+	}
+
+	var cfg []string
+	if err := json.Unmarshal([]byte(addrAnnotation), &cfg); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal host addresses annotation %s for node %q: %v",
+			addrAnnotation, node.Name, err)
+	}
+	return cfg, nil
+}
+
+// GetParsedNodeEIPConfig returns the IPv4 / IPv6 values for the host-addresses annotation
+func GetParsedNodeEIPConfig(node *kapi.Node) (*ParsedNodeEgressIPConfiguration, error) {
+	hostAddresses, err := ParseNodeHostAddressesList(node)
+	if err != nil {
+		return nil, err
+	}
+	result := &ParsedNodeEgressIPConfiguration{Capacity: Capacity{
+		IP:   UnlimitedNodeCapacity,
+		IPv4: UnlimitedNodeCapacity,
+		IPv6: UnlimitedNodeCapacity,
+	}}
+	for _, hostAddress := range hostAddresses {
+		ip, ipNet, err := net.ParseCIDR(hostAddress)
+		if err != nil {
+			return nil, fmt.Errorf("failed to config host address %q for egress IP: %v - skipping", hostAddress, err)
+		}
+		if utilnet.IsIPv6(ip) {
+			result.V6 = append(result.V6, ParsedIFAddr{IP: ip, Net: ipNet})
+		} else {
+			result.V4 = append(result.V4, ParsedIFAddr{IP: ip, Net: ipNet})
+		}
+	}
+	// protect callers from returning no IPs
+	if len(result.V4) == 0 && len(result.V6) == 0 {
+		return nil, fmt.Errorf("failed to find node %s egress IP configuration", node.Name)
+	}
+	return result, nil
+}
+
+// IsNonOVNNetworkContainingIP attempts to find a non OVN managed network that will host the argument IP. If no network is
+// found, false is returned
+func IsNonOVNNetworkContainingIP(node *v1.Node, ip net.IP) (bool, error) {
+	if ip == nil {
+		return false, fmt.Errorf("empty IP is not valid")
+	}
+	if node == nil {
+		return false, fmt.Errorf("unable to determine if IP %s is a non OVN managed network because node argument is nil", ip.String())
+	}
+	network, err := GetNonOVNNetworkContainingIP(node, ip)
+	if err != nil {
+		return false, fmt.Errorf("failed to determine if IP %s is hosted by a non OVN managed network for node %s: %v",
+			ip.String(), node.Name, err)
+	}
+	if network == "" {
+		return false, nil
+	}
+	return true, nil
+}
+
+// GetEgressIPNetwork attempts to assign EgressIP to the primary OVN managed network, otherwise searches through non-OVN
+// managed networks
+func GetEgressIPNetwork(node *v1.Node, eIP net.IP) (string, error) {
+	primaryNetworks, err := getNodeIfAddrAnnotation(node)
+	if err != nil {
+		return "", fmt.Errorf("failed to get node interface address annotation on node %s: %v", node.Name, err)
+	}
+	primaryNetwork := primaryNetworks.IPv4
+	if utilnet.IsIPv6(eIP) {
+		primaryNetwork = primaryNetworks.IPv6
+	}
+	if primaryNetwork != "" {
+		_, primaryNet, err := net.ParseCIDR(primaryNetwork)
+		if err != nil {
+			return "", fmt.Errorf("failed to parse node interface IP CIDR %s on node %s: %v", primaryNetwork, node.Name, err)
+		}
+		if primaryNet.Contains(eIP) {
+			return primaryNet.String(), nil
+		}
+	}
+	networks, err := ParseNodeHostAddressesList(node)
+	if err != nil {
+		return "", fmt.Errorf("failed to get host-addresses annotation for node %s: %v", node.Name, err)
+	}
+	lpmTree := cidrtree.New(makeCIDRs(networks...)...)
+	addr, err := netip.ParseAddr(eIP.String())
+	if err != nil {
+		return "", fmt.Errorf("failed to parse egress IP %s: %v", eIP.String(), err)
+	}
+	match, found := lpmTree.Lookup(addr)
+	if !found {
+		return "", fmt.Errorf("failed to find a network to host egress IP %q. Existing networks are: %s", eIP.String(),
+			lpmTree.String())
+	}
+	return match.String(), nil
+}
+
+// IsOVNManagedNetwork attempts to detect if the argument IP can be hosted by a network managed by OVN. Currently, this is
+// only the primary OVN network
+func IsOVNManagedNetwork(node *v1.Node, ip net.IP) (bool, error) {
+	if ip == nil {
+		return false, fmt.Errorf("empty IP is not valid")
+	}
+	if node == nil {
+		return false, fmt.Errorf("unable to determine if IP %s is OVN managed because node argument is nil", ip.String())
+	}
+	isIPV6 := utilnet.IsIPv6(ip)
+	primaryNetworks, err := getNodeIfAddrAnnotation(node)
+	if err != nil {
+		return false, fmt.Errorf("failed to determine if IP %s is OVN managed: %v", ip.String(), err)
+	}
+	if isIPV6 {
+		if primaryNetworks.IPv6 != "" {
+			_, primaryIPv6IPNet, err := net.ParseCIDR(primaryNetworks.IPv6)
+			if err != nil {
+				return false, fmt.Errorf("failed to parse IPv6 IP CIDR %s and therefore unable to detect if "+
+					"IP %s is OVN managed: %v", primaryNetworks.IPv6, ip.String(), err)
+			}
+			if primaryIPv6IPNet.Contains(ip) {
+				return true, nil
+			} else {
+				return false, nil
+			}
+		}
+	} else {
+		if primaryNetworks.IPv4 != "" {
+			_, primaryIPv4IPNet, err := net.ParseCIDR(primaryNetworks.IPv4)
+			if err != nil {
+				return false, fmt.Errorf("failed to parse IPv4 IP CIDR %s and therefore unable to detect if "+
+					"IP %s is OVN managed: %v", primaryNetworks.IPv4, ip.String(), err)
+			}
+			if primaryIPv4IPNet.Contains(ip) {
+				return true, nil
+			} else {
+				return false, nil
+			}
+		}
+	}
+	return false, fmt.Errorf("unable to determine if IP %s is within the OVN managed network for node %s", ip.String(), node.Name)
+}
+
+// GetNonOVNNetworkContainingIP attempts to find a non OVN managed network to host the argument IP
+func GetNonOVNNetworkContainingIP(node *v1.Node, ip net.IP) (string, error) {
+	if node == nil {
+		return "", fmt.Errorf("unable to determine if IP %s is a non OVN managed because node argument is nil", ip.String())
+	}
+	networks, err := ParseNodeHostAddressesList(node)
+	if err != nil {
+		return "", fmt.Errorf("failed to get host-addresses annotation for node %s: %v", node.Name, err)
+	}
+	ovnManagedNetwork, err := ParseNodePrimaryIfAddr(node)
+	if err != nil {
+		return "", fmt.Errorf("failed to get non-OVN managed networks because failed to get node ovn primary address: %v", err)
+	}
+	if len(ovnManagedNetwork.V4) == 0 && len(ovnManagedNetwork.V6) == 0 {
+		return "", nil
+	}
+	// host-addresses networks include ip + mask so we need to do the same with the found ovn managed network so we can compare later
+	if len(ovnManagedNetwork.V4) > 0 {
+		ovnManagedNetwork.V4[0].Net.IP = ovnManagedNetwork.V4[0].IP
+	}
+	if len(ovnManagedNetwork.V6) > 0 {
+		ovnManagedNetwork.V6[0].Net.IP = ovnManagedNetwork.V6[0].IP
+	}
+	temp := networks[:0]
+	for _, network := range networks {
+		if len(ovnManagedNetwork.V4) > 0 && network != ovnManagedNetwork.V4[0].Net.String() {
+			temp = append(temp, network)
+		} else if len(ovnManagedNetwork.V6) > 0 && network != ovnManagedNetwork.V6[0].Net.String() {
+			temp = append(temp, network)
+		}
+	}
+	networks = temp
+	lpmTree := cidrtree.New(makeCIDRs(networks...)...)
+	addr, err := netip.ParseAddr(ip.String())
+	if err != nil {
+		return "", fmt.Errorf("failed to parse egress IP %s: %v", ip.String(), err)
+	}
+	match, found := lpmTree.Lookup(addr)
+	if !found {
+		return "", nil
+	}
+	return match.String(), nil
 }
 
 // UpdateNodeIDAnnotation updates the ovnNodeID annotation with the node id in the annotations map
