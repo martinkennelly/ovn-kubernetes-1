@@ -21,7 +21,7 @@ import (
 
 func newLocalGateway(nodeName string, hostSubnets []*net.IPNet, gwNextHops []net.IP, gwIntf, egressGWIntf string, gwIPs []*net.IPNet,
 	nodeAnnotator kube.Annotator, cfg *managementPortConfig, kube kube.Interface, watchFactory factory.NodeWatchFactory,
-	routeManager *routemanager.RouteManager) (*gateway, error) {
+	routeManager *routemanager.Controller) (*gateway, error) {
 	klog.Info("Creating new local gateway")
 	gw := &gateway{}
 
@@ -85,7 +85,7 @@ func newLocalGateway(nodeName string, hostSubnets []*net.IPNet, gwNextHops []net
 			}
 		}
 
-		gw.nodeIPManager = newAddressManager(nodeName, kube, cfg, watchFactory, gwBridge)
+		gw.nodeIPManager = newAddressManager(nodeName, kube, cfg, watchFactory, gwBridge, config.IPv4Mode, config.IPv6Mode)
 
 		if err := setNodeMasqueradeIPOnExtBridge(gwBridge.bridgeName); err != nil {
 			return fmt.Errorf("failed to set the node masquerade IP on the ext bridge %s: %v", gwBridge.bridgeName, err)
