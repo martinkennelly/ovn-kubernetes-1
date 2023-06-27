@@ -136,7 +136,7 @@ func (rm *Controller) reconcile() error {
 	}
 
 	var found bool
-	for priority, _ := range rm.ownPriorities {
+	for priority := range rm.ownPriorities {
 		for _, ruleFound := range rulesFound {
 			if ruleFound.Priority != priority {
 				continue
