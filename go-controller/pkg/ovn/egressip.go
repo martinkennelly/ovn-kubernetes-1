@@ -1876,6 +1876,8 @@ func (e *egressIPZoneController) deleteEgressIPStatusSetup(name string, status e
 			return nil, fmt.Errorf("error removing nexthop IP %s from egress ip %s policies on router %s: %v",
 				nextHopIP, name, types.OVNClusterRouter, err)
 		}
+	} else {
+		klog.Errorf("Failed to get next hop for EgressIP %s for ip %s", name, status.EgressIP)
 	}
 
 	var nats []*nbdb.NAT

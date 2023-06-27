@@ -1332,8 +1332,7 @@ func (eIPC *egressIPClusterController) isEgressIPAddrConflict(egressIP net.IP) (
 	for _, node := range nodes {
 		nodeHostAddressesSet, err := util.ParseNodeHostAddressesDropNetMask(node)
 		if err != nil {
-			return false, fmt.Errorf("failed to detect IP address conflict for EgressIP %s because unable to parse "+
-				"node host addresses: %v", egressIP.String(), err)
+			return false, fmt.Errorf("failed to parse node host addresses for node %s: %v", node.Name, err)
 		}
 		if nodeHostAddressesSet.Has(egressIP.String()) {
 			return true, nil
