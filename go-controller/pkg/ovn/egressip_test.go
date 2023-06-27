@@ -10107,3 +10107,16 @@ func getNodeObj(nodeName string, annotations, labels map[string]string) v1.Node 
 		},
 	}
 }
+
+func getSwitchManagementPortIP(node *v1.Node, v6 bool) (net.IP, error) {
+	// fetch node annotation of the egress node
+	networkName := "default"
+	ipNets, err := util.ParseNodeHostSubnetAnnotation(node, networkName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse node (%s) subnets to get management port IP: %v", node.Name, err)
+	}
+	for _, ipnet := range ipNets {
+		return util.GetNodeManagementIfAddr(ipnet).IP, nil
+	}
+	return nil, fmt.Errorf("failed to find management port IP (v6: %v) for node %s", v6, node.Name)
+}
