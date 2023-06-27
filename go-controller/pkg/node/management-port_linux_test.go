@@ -27,6 +27,7 @@ import (
 	egressipv1fake "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/egressip/v1/apis/clientset/versioned/fake"
 	egressservicefake "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/egressservice/v1/apis/clientset/versioned/fake"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/kube"
+	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/node/routemanager"
 	ovntest "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/testing"
 	mocks "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/testing/mocks/github.com/vishvananda/netlink"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/types"
@@ -267,7 +268,7 @@ func testManagementPort(ctx *cli.Context, fexec *ovntest.FakeExec, testNS ns.Net
 	nodeAnnotator := kube.NewNodeAnnotator(&kube.KubeOVN{Kube: kube.Kube{KClient: fakeClient}, EIPClient: egressipv1fake.NewSimpleClientset(), EgressFirewallClient: &egressfirewallfake.Clientset{}, EgressServiceClient: &egressservicefake.Clientset{}}, existingNode.Name)
 	waiter := newStartupWaiter()
 	wg := &sync.WaitGroup{}
-	rm := newRouteManager(true, 10*time.Second)
+	rm := routemanager.NewRouteManager(true, 10*time.Second)
 	stopCh := make(chan struct{})
 	defer func() {
 		close(stopCh)
@@ -278,7 +279,7 @@ func testManagementPort(ctx *cli.Context, fexec *ovntest.FakeExec, testNS ns.Net
 	go testNS.Do(func(netNS ns.NetNS) error {
 		defer wg.Done()
 		defer GinkgoRecover()
-		rm.run(stopCh)
+		rm.Run(stopCh)
 		return nil
 	})
 
@@ -361,12 +362,12 @@ func testManagementPortDPU(ctx *cli.Context, fexec *ovntest.FakeExec, testNS ns.
 	nodeAnnotator := kube.NewNodeAnnotator(&kube.KubeOVN{Kube: kube.Kube{KClient: fakeClient}, EIPClient: egressipv1fake.NewSimpleClientset(), EgressFirewallClient: &egressfirewallfake.Clientset{}, EgressServiceClient: &egressservicefake.Clientset{}}, existingNode.Name)
 	waiter := newStartupWaiter()
 	wg := &sync.WaitGroup{}
-	rm := newRouteManager(true, 10*time.Second)
+	rm := routemanager.NewRouteManager(true, 10*time.Second)
 	stopCh := make(chan struct{})
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		rm.run(stopCh)
+		rm.Run(stopCh)
 	}()
 	defer func() {
 		close(stopCh)
@@ -450,13 +451,13 @@ func testManagementPortDPUHost(ctx *cli.Context, fexec *ovntest.FakeExec, testNS
 	_, err = config.InitConfig(ctx, fexec, nil)
 	Expect(err).NotTo(HaveOccurred())
 	wg := &sync.WaitGroup{}
-	rm := newRouteManager(true, 10*time.Second)
+	rm := routemanager.NewRouteManager(true, 10*time.Second)
 	stopCh := make(chan struct{})
 	wg.Add(1)
 	go testNS.Do(func(netNS ns.NetNS) error {
 		defer wg.Done()
 		defer GinkgoRecover()
-		rm.run(stopCh)
+		rm.Run(stopCh)
 		return nil
 	})
 	defer func() {
