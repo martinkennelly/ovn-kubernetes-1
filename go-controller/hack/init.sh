@@ -25,6 +25,11 @@ EOF
         exit 2
     fi
 
+    if [[ -z "$(command -v iptables)" ]]; then
+      apt update
+      apt install iptables -y
+    fi
+
     unset GOBIN
 
     # create a local GOPATH in _output
