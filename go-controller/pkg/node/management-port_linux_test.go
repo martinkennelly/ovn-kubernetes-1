@@ -363,8 +363,10 @@ func testManagementPortDPU(ctx *cli.Context, fexec *ovntest.FakeExec, testNS ns.
 	wg := &sync.WaitGroup{}
 	rm := routemanager.NewController()
 	stopCh := make(chan struct{})
+	wg.Add(1)
 	go testNS.Do(func(netNS ns.NetNS) error {
 		rm.Run(stopCh, 10*time.Second)
+		wg.Done()
 		return nil
 	})
 	defer func() {
@@ -749,6 +751,24 @@ var _ = Describe("Management Port Operations", func() {
 		var testNS ns.NetNS
 		var fexec *ovntest.FakeExec
 
+		const (
+			mgmtPortNetdev string = "pf0vf0"
+			v4clusterCIDR  string = "10.1.0.0/16"
+			v4nodeSubnet   string = "10.1.1.0/24"
+			v4gwIP         string = "10.1.1.1"
+			v4mgtPortIP    string = "10.1.1.2"
+			v4serviceCIDR  string = "172.16.1.0/24"
+			v4lrpMAC       string = "0a:58:0a:01:01:01"
+
+			v6clusterCIDR string = "fda6::/48"
+			v6nodeSubnet  string = "fda6:0:0:1::/64"
+			v6gwIP        string = "fda6:0:0:1::1"
+			v6mgtPortIP   string = "fda6:0:0:1::2"
+			v6serviceCIDR string = "fc95::/64"
+			// generated from util.IPAddrToHWAddr(net.ParseIP("fda6:0:0:1::1")).String()
+			v6lrpMAC string = "0a:58:23:5a:40:f1"
+		)
+
 		tmpDir, tmpErr = ioutil.TempDir("", "clusternodetest_certdir")
 		if tmpErr != nil {
 			GinkgoT().Errorf("failed to create tempdir: %v", tmpErr)
@@ -772,25 +792,6 @@ var _ = Describe("Management Port Operations", func() {
 			Expect(testNS.Close()).To(Succeed())
 			Expect(testutils.UnmountNS(testNS)).To(Succeed())
 		})
-
-		const (
-			v4clusterCIDR string = "10.1.0.0/16"
-			v4nodeSubnet  string = "10.1.1.0/24"
-			v4gwIP        string = "10.1.1.1"
-			v4mgtPortIP   string = "10.1.1.2"
-			v4serviceCIDR string = "172.16.1.0/24"
-			v4lrpMAC      string = "0a:58:0a:01:01:01"
-
-			v6clusterCIDR string = "fda6::/48"
-			v6nodeSubnet  string = "fda6:0:0:1::/64"
-			v6gwIP        string = "fda6:0:0:1::1"
-			v6mgtPortIP   string = "fda6:0:0:1::2"
-			v6serviceCIDR string = "fc95::/64"
-			// generated from util.IPAddrToHWAddr(net.ParseIP("fda6:0:0:1::1")).String()
-			v6lrpMAC string = "0a:58:23:5a:40:f1"
-
-			mgmtPortNetdev string = "pf0vf0"
-		)
 
 		Context("Management Port, ovnkube node mode full", func() {
 
