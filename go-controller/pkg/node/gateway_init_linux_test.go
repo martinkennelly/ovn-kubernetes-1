@@ -201,6 +201,10 @@ func shareGatewayInterfaceTest(app *cli.App, testNS ns.NetNS,
 		existingNode := v1.Node{
 			ObjectMeta: metav1.ObjectMeta{
 				Name: nodeName,
+				Annotations: map[string]string{
+					"k8s.ovn.org/node-primary-ifaddr": fmt.Sprintf("{\"ipv4\": \"%s\"}", eth0CIDR),
+					"k8s.ovn.org/host-addresses":      fmt.Sprintf("[\"%s\"]", eth0CIDR),
+				},
 			},
 		}
 		if setNodeIP {
@@ -571,6 +575,12 @@ func shareGatewayInterfaceDPUTest(app *cli.App, testNS ns.NetNS,
 		nodeAddr := v1.NodeAddress{Type: v1.NodeInternalIP, Address: dpuIP}
 		existingNode := v1.Node{ObjectMeta: metav1.ObjectMeta{
 			Name: nodeName,
+			Annotations: map[string]string{
+				"k8s.ovn.org/node-chassis-id":     "cb9ec8fa-b409-4ef3-9f42-d9283c47aac6",
+				"k8s.ovn.org/node-primary-ifaddr": fmt.Sprintf("{\"ipv4\": \"%s\"}", hostCIDR),
+				"k8s.ovn.org/host-addresses":      fmt.Sprintf("[\"%s\",\"%s\"]", hostCIDR, dpuIP+"/24"),
+				"k8s.ovn.org/l3-gateway-config":   fmt.Sprintf(`{"default":{"mode":"shared","mac-address":"aa:bb:cc:dd:ee:ff", "ip-address":"%s", "next-hop":"192.168.126.1"}}`, hostCIDR),
+			},
 		},
 			Status: v1.NodeStatus{Addresses: []v1.NodeAddress{nodeAddr}},
 		}
@@ -709,6 +719,10 @@ func shareGatewayInterfaceDPUHostTest(app *cli.App, testNS ns.NetNS, uplinkName,
 
 		nodeAddr := v1.NodeAddress{Type: v1.NodeInternalIP, Address: hostIP}
 		existingNode := v1.Node{ObjectMeta: metav1.ObjectMeta{
+			Annotations: map[string]string{
+				"k8s.ovn.org/node-primary-ifaddr": fmt.Sprintf("{\"ipv4\": \"%s/24\"}", hostIP),
+				"k8s.ovn.org/host-addresses":      fmt.Sprintf("[\"%s/24\"]", hostIP),
+			},
 			Name: nodeName,
 		},
 			Status: v1.NodeStatus{Addresses: []v1.NodeAddress{nodeAddr}},
@@ -986,6 +1000,10 @@ OFPT_GET_CONFIG_REPLY (xid=0x4): frags=normal miss_send_len=0`,
 		nodeAddr := v1.NodeAddress{Type: v1.NodeInternalIP, Address: expectedAddr.IP.String()}
 		existingNode := v1.Node{ObjectMeta: metav1.ObjectMeta{
 			Name: nodeName,
+			Annotations: map[string]string{
+				"k8s.ovn.org/node-primary-ifaddr": fmt.Sprintf("{\"ipv4\": \"%s\"}", eth0CIDR),
+				"k8s.ovn.org/host-addresses":      fmt.Sprintf("[\"%s\"]", eth0CIDR),
+			},
 		},
 			Status: v1.NodeStatus{Addresses: []v1.NodeAddress{nodeAddr}},
 		}
