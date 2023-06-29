@@ -134,7 +134,8 @@ func GetNodeAddresses(ipv4, ipv6 bool, nodes ...*v1.Node) (ipsv4 []net.IP, ipsv6
 	for _, cidr := range allCIDRs.UnsortedList() {
 		ip, _, err := net.ParseCIDR(cidr)
 		if err != nil {
-			klog.Errorf("Failed to get host-addresses")
+			klog.Errorf("Failed to get node addresses for node(s) (%v) because unable to parse CIDR %s: %v", nodes, cidr, err)
+			continue
 		}
 		if ipv4 && utilnet.IsIPv4(ip) {
 			ipsv4 = append(ipsv4, ip)
