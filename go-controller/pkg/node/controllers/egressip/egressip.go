@@ -655,9 +655,10 @@ func (c *Controller) GetLinkContainingIPAndValidate(ip net.IP, expectedNetwork s
 	if !found {
 		return false, nil, nil
 	}
-	if network.String() != expectedNetwork {
-		return false, nil, fmt.Errorf("EgressIP %s is was assigned to network %s but we got network %s. Mismatch therefore not assigning",
-			ip.String(), expectedNetwork, network.String())
+	// network may not have been assigned yet and we don't depend on status
+	if expectedNetwork != "" && network.String() != expectedNetwork {
+		klog.Errorf("EgressIP %s is assigned to network %q by cluster manager but EIP controller calculated the network "+
+			"is %q. Mismatch and a programming error. Please file an issue", ip.String(), expectedNetwork, network.String())
 	}
 	return true, prefixLinks[network.String()], nil
 }
