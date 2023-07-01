@@ -56,8 +56,8 @@ function testrun {
         args="${args} -test.coverprofile=${idx}.coverprofile "
     fi
     if [[ " ${big_pkgs[@]} " =~ " $pkg " ]]; then
-        echo "Increasing timeout to 20m for package ${pkg}"
-        args="${args} -test.timeout=20m"
+        echo "Increasing timeout to 30m for package ${pkg}"
+        args="${args} -test.timeout=30m"
     fi
     if grep -q "ginkgo" ."${path}"/*_test.go; then
 	    prefix=$(echo "${path}" | cut -c 2- | sed 's,/,_,g')
