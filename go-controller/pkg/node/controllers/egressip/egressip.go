@@ -35,7 +35,8 @@ const (
 	routeTableStart   = 1000
 	multiNICChainName = "OVN-KUBE-EGRESS-IP-MULTI-NIC"
 	multiNICChain     = utiliptables.Chain(multiNICChainName)
-	skipBridges       = true
+	ignoreBridges     = true
+	acceptAssignedIPs = false
 )
 
 var (
@@ -488,7 +489,7 @@ func (c *Controller) getLinkAddressRoutes() (map[string][]netlink.Addr, map[stri
 	linkRoutes := make(map[string][]netlink.Route)
 	for _, link := range links {
 		// get all link addresses including any assigned addresses used for EIP
-		addresses, err := linkmanager.GetExternallyAvailableAddresses(link, c.v4, c.v6)
+		addresses, err := linkmanager.GetExternallyAvailableAddresses(link, c.v4, c.v6, acceptAssignedIPs, ignoreBridges)
 		if err != nil {
 			klog.Warningf("Skipping link %q because unable to get link addresses: %v", link.Attrs().Name, err)
 			continue
