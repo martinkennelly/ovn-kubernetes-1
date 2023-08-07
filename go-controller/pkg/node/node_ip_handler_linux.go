@@ -13,6 +13,7 @@ import (
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/config"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/factory"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/kube"
+	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/node/linkmanager"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/types"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
 
@@ -41,6 +42,11 @@ type addressManager struct {
 	OnChanged func()
 	sync.Mutex
 }
+
+const (
+	ignoreBridges       = true
+	ignoreAssignedAddrs = true
+)
 
 // initializes a new address manager which will hold all the IPs on a node
 func newAddressManager(nodeName string, k kube.Interface, config *managementPortConfig, watchFactory factory.NodeWatchFactory, gwBridge *bridgeConfiguration) *addressManager {
@@ -430,20 +436,27 @@ func (c *addressManager) isValidNodeIP(addr net.IP) bool {
 }
 
 func (c *addressManager) sync() {
-	var err error
-	var addrs []net.Addr
+	var addrs []netlink.Addr
 
 	if c.useNetlink {
-		addrs, err = net.InterfaceAddrs()
+		links, err := netlink.LinkList()
 		if err != nil {
-			klog.Errorf("Failed to sync Node IP Manager: unable list all IPs on the node, error: %v", err)
+			klog.Errorf("Failed to sync Node IP Manager because unable to retrieve links and therefore unable to sync "+
+				"node addresses: %v", err)
 			return
+		}
+		for _, link := range links {
+			linkAddrs, err := linkmanager.GetExternallyAvailableAddresses(link, config.IPv4Mode, config.IPv6Mode, ignoreAssignedAddrs, ignoreBridges)
+			if err != nil {
+				klog.Errorf("While syncing Node IP Managers node addresses, failed to retrieve addresses for link %s: %v", link, err)
+			}
+			addrs = append(addrs, linkAddrs...)
 		}
 	}
 
 	currAddresses := sets.New[string]()
 	for _, addr := range addrs {
-		ip, ipnet, err := net.ParseCIDR(addr.String())
+		ip, ipnet, err := net.ParseCIDR(addr.IPNet.String())
 		if err != nil {
 			klog.Errorf("Invalid IP address found on host: %s", addr.String())
 			continue
