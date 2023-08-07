@@ -210,11 +210,16 @@ func GetAssignedAddressLabel(linkName string) string {
 // Must not have a parent
 // Address must have scope universe
 // Assigned addresses are included
-func GetExternallyAvailableAddresses(link netlink.Link, v4, v6 bool) ([]netlink.Addr, error) {
+func GetExternallyAvailableAddresses(link netlink.Link, v4, v6, skipAssignedIPs, skipBridges bool) ([]netlink.Addr, error) {
 	validAddresses := make([]netlink.Addr, 0)
 	flags := link.Attrs().Flags.String()
-	if !isValidLinkFlags(flags) || !isValidLinkAttrs(link.Attrs()) {
+	if !isValidLinkFlags(flags) {
 		return validAddresses, nil
+	}
+	if skipBridges {
+		if !isValidLinkAttrs(link.Attrs()) {
+			return validAddresses, nil
+		}
 	}
 	linkAddresses, err := getAllLinkAddressesByIPFamily(link, v4, v6)
 	if err != nil {
@@ -224,6 +229,12 @@ func GetExternallyAvailableAddresses(link netlink.Link, v4, v6 bool) ([]netlink.
 		// consider only GLOBAL scope addresses
 		if address.Scope != int(netlink.SCOPE_UNIVERSE) {
 			continue
+		}
+		if skipAssignedIPs {
+			// skip assigned addresses
+			if address.Label == GetAssignedAddressLabel(link.Attrs().Name) {
+				continue
+			}
 		}
 		validAddresses = append(validAddresses, address)
 	}
