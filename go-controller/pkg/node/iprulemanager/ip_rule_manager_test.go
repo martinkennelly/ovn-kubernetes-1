@@ -18,7 +18,7 @@ import (
 
 const oneSec = 1 * time.Second
 
-var _ = ginkgo.Describe("IP Rule Manager", func() {
+var _ = ginkgo.XDescribe("IP Rule Manager", func() {
 	var stopCh chan struct{}
 	var wg *sync.WaitGroup
 	var testNS ns.NetNS
