@@ -228,49 +228,29 @@ func GetAddressesExcludeAssigned(link netlink.Link, v4, v6 bool) ([]netlink.Addr
 	return tmp, nil
 }
 
-// GetExternallyAvailableAddresses gets all addresses assigned on an interface with the following characteristics:
-// Must be up
-// Address must have scope universe
-// Assigned addresses are included
-func GetExternallyAvailableAddresses(link netlink.Link, v4, v6 bool) ([]netlink.Addr, error) {
-	validAddresses := make([]netlink.Addr, 0)
-	flags := link.Attrs().Flags.String()
-	if !isValidLinkFlags(flags) {
-		return validAddresses, nil
-	}
-	linkAddresses, err := util.GetFilteredInterfaceAddrs(link, v4, v6)
-	if err != nil {
-		return validAddresses, fmt.Errorf("failed to get all valid link addresses: %v", err)
-	}
-	for _, address := range linkAddresses {
-		// consider only GLOBAL scope addresses
-		if address.Scope != int(netlink.SCOPE_UNIVERSE) {
-			continue
-		}
-		validAddresses = append(validAddresses, address)
-	}
-	return validAddresses, nil
-}
-
-// GetExternallyAvailablePrefixesExcludeAssigned returns address Prefixes from interfaces with the following characteristics:
-// Must be up
-// Must not be loopback
-// Must not have a parent
-// Address must have scope universe
-// Address must not be an address assigned to a link by link manager
-func GetExternallyAvailablePrefixesExcludeAssigned(link netlink.Link, v4, v6 bool) ([]netip.Prefix, error) {
+// GetFilteredPrefixes returns address Prefixes from interfaces with the following characteristics:
+// Link must be up
+// Exclude addresses that are not global unicast addresses
+// Exclude link manager assigned addresses (EIP IPs only for now)
+// Exclude keepalived assigned addresses
+// Exclude addresses assigned by metal LB
+// Exclude OVN reserved addresses
+func GetFilteredPrefixes(link netlink.Link, v4, v6 bool) ([]netip.Prefix, error) {
 	validAddresses := make([]netip.Prefix, 0)
 	flags := link.Attrs().Flags.String()
-	if !isValidLinkFlags(flags) {
+	if !isLinkUp(flags) {
 		return validAddresses, nil
 	}
 	linkAddresses, err := util.GetFilteredInterfaceAddrs(link, v4, v6)
 	if err != nil {
-		return validAddresses, fmt.Errorf("failed to get all valid link addresses: %v", err)
+		return nil, fmt.Errorf("failed to get link %s addresses: %v", link.Attrs().Name, err)
 	}
 	// netip pkg does not expose addresses labels. We must get addresses with netlink lib first to check if addr
 	// is managed or not
 	for _, address := range linkAddresses {
+		if !address.IP.IsGlobalUnicast() {
+			continue
+		}
 		// check for assigned address - assigned addresses contain a well-known label
 		if address.Label != "" {
 			link, err := netlink.LinkByIndex(address.LinkIndex)
@@ -286,15 +266,12 @@ func GetExternallyAvailablePrefixesExcludeAssigned(link netlink.Link, v4, v6 boo
 		if err != nil {
 			return nil, fmt.Errorf("unable to parse address %s on link %s: %v", address.String(), link.Attrs().Name, err)
 		}
-		if !addr.Addr().IsGlobalUnicast() {
-			continue
-		}
 		validAddresses = append(validAddresses, addr)
 	}
 	return validAddresses, nil
 }
 
-func isValidLinkFlags(flags string) bool {
+func isLinkUp(flags string) bool {
 	// exclude interfaces that aren't up
 	return strings.Contains(flags, "up")
 }

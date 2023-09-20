@@ -762,7 +762,7 @@ func (c *Controller) RepairNode() error {
 		link := link
 		linkName := link.Attrs().Name
 		linkIdx := link.Attrs().Index
-		addresses, err := linkmanager.GetExternallyAvailableAddresses(link, c.v4, c.v6)
+		addresses, err := util.GetFilteredInterfaceAddrs(link, c.v4, c.v6)
 		if err != nil {
 			return fmt.Errorf("unable to get link addresses for link %s: %v", linkName, err)
 		}
@@ -1042,7 +1042,7 @@ func findLinkOnSameNetworkAsIPUsingLPM(ip net.IP, v4, v6 bool) (bool, netlink.Li
 	}
 	for _, link := range links {
 		link := link
-		linkPrefixes, err := linkmanager.GetExternallyAvailablePrefixesExcludeAssigned(link, v4, v6)
+		linkPrefixes, err := linkmanager.GetFilteredPrefixes(link, v4, v6)
 		if err != nil {
 			klog.Errorf("Failed to get address from link %s: %v", link.Attrs().Name, err)
 			continue
