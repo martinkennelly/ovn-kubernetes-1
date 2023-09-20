@@ -109,7 +109,7 @@ func (c *Controller) reconcile() {
 	for _, link := range links {
 		linkName := link.Attrs().Name
 		// get all addresses associated with the link depending on which IP families we support
-		foundAddresses, err := getAllLinkAddressesByIPFamily(link, c.ipv4Enabled, c.ipv6Enabled)
+		foundAddresses, err := util.GetFilteredInterfaceAddrs(link, c.ipv4Enabled, c.ipv6Enabled)
 		if err != nil {
 			klog.Errorf("Link Network Manager: failed to get address from link %q", linkName)
 			continue
@@ -239,7 +239,7 @@ func GetExternallyAvailableAddresses(link netlink.Link, v4, v6 bool) ([]netlink.
 	if !isValidLinkFlags(flags) {
 		return validAddresses, nil
 	}
-	linkAddresses, err := getAllLinkAddressesByIPFamily(link, v4, v6)
+	linkAddresses, err := util.GetFilteredInterfaceAddrs(link, v4, v6)
 	if err != nil {
 		return validAddresses, fmt.Errorf("failed to get all valid link addresses: %v", err)
 	}
@@ -265,7 +265,7 @@ func GetExternallyAvailablePrefixesExcludeAssigned(link netlink.Link, v4, v6 boo
 	if !isValidLinkFlags(flags) {
 		return validAddresses, nil
 	}
-	linkAddresses, err := getAllLinkAddressesByIPFamily(link, v4, v6)
+	linkAddresses, err := util.GetFilteredInterfaceAddrs(link, v4, v6)
 	if err != nil {
 		return validAddresses, fmt.Errorf("failed to get all valid link addresses: %v", err)
 	}
@@ -298,25 +298,6 @@ func GetExternallyAvailablePrefixesExcludeAssigned(link netlink.Link, v4, v6 boo
 func isValidLinkFlags(flags string) bool {
 	// exclude interfaces that aren't up
 	return strings.Contains(flags, "up")
-}
-
-func getAllLinkAddressesByIPFamily(link netlink.Link, v4, v6 bool) ([]netlink.Addr, error) {
-	links := make([]netlink.Addr, 0)
-	if v4 {
-		linksFound, err := util.GetNetLinkOps().AddrList(link, netlink.FAMILY_V4)
-		if err != nil {
-			return links, fmt.Errorf("failed to list link addresses: %v", err)
-		}
-		links = linksFound
-	}
-	if v6 {
-		linksFound, err := util.GetNetLinkOps().AddrList(link, netlink.FAMILY_V6)
-		if err != nil {
-			return links, fmt.Errorf("failed to list link addresses: %v", err)
-		}
-		links = append(links, linksFound...)
-	}
-	return links, nil
 }
 
 func containsAddress(addresses []netlink.Addr, candidate netlink.Addr) bool {
