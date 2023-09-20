@@ -762,7 +762,7 @@ func (c *Controller) RepairNode() error {
 		link := link
 		linkName := link.Attrs().Name
 		linkIdx := link.Attrs().Index
-		addresses, err := linkmanager.GetExternallyAvailableAddresses(link, c.v4, c.v6)
+		addresses, err := util.GetFilteredInterfaceAddrs(link, c.v4, c.v6)
 		if err != nil {
 			return fmt.Errorf("unable to get link addresses for link %s: %v", linkName, err)
 		}
@@ -1042,7 +1042,7 @@ func findLinkOnSameNetworkAsIPUsingLPM(ip net.IP, v4, v6 bool) (bool, netlink.Li
 	}
 	for _, link := range links {
 		link := link
-		linkPrefixes, err := linkmanager.GetExternallyAvailablePrefixesExcludeAssigned(link, v4, v6)
+		linkPrefixes, err := getFilteredPrefixes(link, v4, v6)
 		if err != nil {
 			klog.Errorf("Failed to get address from link %s: %v", link.Attrs().Name, err)
 			continue
@@ -1074,7 +1074,55 @@ func findLinkOnSameNetworkAsIPUsingLPM(ip net.IP, v4, v6 bool) (bool, netlink.Li
 	return true, link, nil
 }
 
-func getNetlinkAddressWithLabel(addr *net.IPNet, ifindex int, linkName string) *netlink.Addr {
+// getFilteredPrefixes returns address Prefixes from interfaces with the following characteristics:
+// Link must be up
+// Exclude keepalived assigned addresses
+// Exclude addresses assigned by metal LB
+// Exclude OVN reserved addresses
+// Exclude networks with just one IP i.e  masks /32 for IPv4 or /128 for IPv6
+func getFilteredPrefixes(link netlink.Link, v4, v6 bool) ([]netip.Prefix, error) {
+	validAddresses := make([]netip.Prefix, 0)
+	flags := link.Attrs().Flags.String()
+	if !isLinkUp(flags) {
+		return validAddresses, nil
+	}
+	linkAddresses, err := util.GetFilteredInterfaceAddrs(link, v4, v6)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get link %s addresses: %v", link.Attrs().Name, err)
+	}
+	for _, address := range linkAddresses {
+		if isOneIPNetwork(address.IPNet) {
+			continue
+		}
+		addr, err := netip.ParsePrefix(address.IPNet.String())
+		if err != nil {
+			return nil, fmt.Errorf("unable to parse address %s on link %s: %v", address.String(), link.Attrs().Name, err)
+		}
+		validAddresses = append(validAddresses, addr)
+	}
+	return validAddresses, nil
+}
+
+// isOneIPNetwork returns true if only one address exists in the network attached to the IPs mask - itself.
+func isOneIPNetwork(ipnet *net.IPNet) bool {
+	ones, bits := ipnet.Mask.Size()
+	// IPv4
+	if ones == 32 && bits == 32 {
+		return true
+	}
+	// IPv6
+	if ones == 128 && bits == 128 {
+		return true
+	}
+	return false
+}
+
+func isLinkUp(flags string) bool {
+	// exclude interfaces that aren't up
+	return strings.Contains(flags, "up")
+}
+
+func getNetlinkAddress(addr *net.IPNet, ifindex int) *netlink.Addr {
 	return &netlink.Addr{
 		IPNet:     addr,
 		Scope:     int(netlink.SCOPE_UNIVERSE),
