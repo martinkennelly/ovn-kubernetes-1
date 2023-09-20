@@ -399,7 +399,7 @@ func (c *addressManager) sync() {
 			return
 		}
 		for _, link := range links {
-			foundAddrs, err := linkmanager.GetExternallyAvailableAddressesExcludeAssigned(link, config.IPv4Mode, config.IPv6Mode)
+			foundAddrs, err := linkmanager.GetAddressesExcludeAssigned(link, config.IPv4Mode, config.IPv6Mode)
 			if err != nil {
 				klog.Errorf("Unable to retrieve addresses for link %s: %v", link.Attrs().Name, err)
 				return

@@ -207,12 +207,11 @@ func GetAssignedAddressLabel(linkName string) string {
 	return fmt.Sprintf("%sovn", linkName)
 }
 
-// GetExternallyAvailableAddressesExcludeAssigned gets all addresses assigned on an interface with the following characteristics:
+// GetAddressesExcludeAssigned gets all addresses assigned on an interface with the following characteristics:
 // Must be up
-// Address must have scope universe
-// Assigned addresses are excluded
-func GetExternallyAvailableAddressesExcludeAssigned(link netlink.Link, v4, v6 bool) ([]netlink.Addr, error) {
-	addresses, err := GetExternallyAvailableAddresses(link, v4, v6)
+// Link manager assigned addresses are excluded (currently only EIP IPs)
+func GetAddressesExcludeAssigned(link netlink.Link, v4, v6 bool) ([]netlink.Addr, error) {
+	addresses, err := util.GetFilteredInterfaceAddrs(link, v4, v6)
 	if err != nil {
 		return nil, err
 	}
