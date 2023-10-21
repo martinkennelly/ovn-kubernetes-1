@@ -537,6 +537,7 @@ func (c *Controller) processEIP(eip *eipv1.EgressIP) (*eIPConfig, *podIPConfigLi
 				fmt.Errorf("failed to find a network to host EgressIP %s IP %s: %v", eip.Name, status.EgressIP, err)
 		}
 		if !found {
+			klog.Errorf("Expected to find a network interface to host Egress IP %s but failed to find it", status.EgressIP)
 			continue
 		}
 		klog.Infof("Generating config for EgressIP %s IP %s which is hosted by a non-OVN managed interface (name %s)",
@@ -1028,7 +1029,6 @@ func findLinkOnSameNetworkAsIP(ip net.IP, v4, v6 bool) (bool, netlink.Link, erro
 		return false, nil, fmt.Errorf("failed to find network to host IP %s: %v", ip.String(), err)
 	}
 	return found, link, nil
-
 }
 
 // findLinkOnSameNetworkAsIPUsingLPM iterates through all links found locally building a map of addresses associated with
