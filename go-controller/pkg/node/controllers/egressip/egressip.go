@@ -61,8 +61,8 @@ type eIPConfig struct {
 	// EgressIP name
 	name string
 	// EgressIP IP
-	ip        *netlink.Addr
-	routeLink *routemanager.RoutesPerLink
+	ip     *netlink.Addr
+	routes []netlink.Route
 }
 
 func newEIPConfig() *eIPConfig {
@@ -545,17 +545,25 @@ func (c *Controller) processEIP(eip *eipv1.EgressIP) (*eIPConfig, *podIPConfigLi
 			eip.Name, status.EgressIP, link.Attrs().Name)
 		// go through all selected pods and build a config per pod IP. We know there are at least one pod and these the
 		// pod(s) have IP(s).
-		eIPConfig, podIPConfigs := generateEIPConfigForPods(selectedPodIPs, link, eIPNet, isEIPV6)
+		eIPConfig, podIPConfigs, err := generateEIPConfigForPods(selectedPodIPs, link, eIPNet, isEIPV6)
+		if err != nil {
+			return nil, nil, selectedNamespaces, selectedPods, selectedNamespacesPods,
+				fmt.Errorf("failed to generated config for EgressIP %s IP %s: %v", eip.Name, status.EgressIP, err)
+		}
 		// ignore other EIP IPs. Multiple EIP IPs cannot be assigned to the same node
 		return eIPConfig, podIPConfigs, selectedNamespaces, selectedPods, selectedNamespacesPods, nil
 	}
 	return nil, nil, selectedNamespaces, selectedPods, selectedNamespacesPods, nil
 }
 
-func generateEIPConfigForPods(pods map[ktypes.NamespacedName][]net.IP, link netlink.Link, eIPNet *net.IPNet, isEIPV6 bool) (*eIPConfig, *podIPConfigList) {
+func generateEIPConfigForPods(pods map[ktypes.NamespacedName][]net.IP, link netlink.Link, eIPNet *net.IPNet, isEIPV6 bool) (*eIPConfig, *podIPConfigList, error) {
 	eipConfig := newEIPConfig()
 	newPodIPConfigs := newPodIPConfigList()
-	eipConfig.routeLink = getDefaultRouteForLink(link, isEIPV6)
+	linkRoutes, err := generateRoutesForLink(link, isEIPV6)
+	if err != nil {
+		return nil, nil, err
+	}
+	eipConfig.routes = linkRoutes
 	eipConfig.ip = getNetlinkAddressWithLabel(eIPNet, link.Attrs().Index, link.Attrs().Name)
 	for _, podIPs := range pods {
 		for _, podIP := range podIPs {
@@ -570,7 +578,17 @@ func generateEIPConfigForPods(pods map[ktypes.NamespacedName][]net.IP, link netl
 			newPodIPConfigs.elems = append(newPodIPConfigs.elems, ipConfig)
 		}
 	}
-	return eipConfig, newPodIPConfigs
+	return eipConfig, newPodIPConfigs, nil
+}
+
+func generateRoutesForLink(link netlink.Link, isV6 bool) ([]netlink.Route, error) {
+	linkRoutes, err := netlink.RouteList(link, getIPFamily(isV6))
+	if err != nil {
+		return nil, fmt.Errorf("failed to get routes for link %s: %v", link.Attrs().Name, err)
+	}
+	linkRoutes = ensureAtLeastOneDefaultRoute(linkRoutes, link.Attrs().Index, isV6)
+	overwriteRoutesTableID(linkRoutes, getRouteTableID(link.Attrs().Index))
+	return linkRoutes, nil
 }
 
 func (c *Controller) deleteRefObjects(name string) {
@@ -641,16 +659,32 @@ func (c *Controller) updateEIP(existing *state, update *config) error {
 			return fmt.Errorf("failed to delete egress IP address %s: %w", existing.eIPConfig.ip, err)
 		}
 	}
-	if (update == nil && existing.eIPConfig != nil && existing.eIPConfig.routeLink != nil) ||
-		(update != nil && update.eIPConfig != nil && update.eIPConfig.routeLink != nil &&
-			existing.eIPConfig != nil && existing.eIPConfig.routeLink != nil &&
-			!existing.eIPConfig.routeLink.Equal(*update.eIPConfig.routeLink)) {
-		// route manager takes care of retry
-		c.routeManager.Del(*existing.eIPConfig.routeLink)
+	// delete stale routes
+	// existing routes need to be deleted if there's no update and if there's no other active egress IP on this link.
+	if update == nil && existing.eIPConfig != nil && len(existing.eIPConfig.routes) > 0 && existing.eIPConfig.ip != nil {
+		// Egress IP for this config and link should already be deleted in steps previously.
+		// If there is different Egress IP active on this link, we do not want to delete the routes needed for that other egress IP.
+		ipFamily := getIPFamily(utilnet.IsIPv6(existing.eIPConfig.ip.IP))
+		isEIPOnLink, err := isEgressIPOnLink(existing.eIPConfig.ip.LinkIndex, ipFamily)
+		if err != nil {
+			return fmt.Errorf("failed to determine if link with index %d hosts an existing Egress IP: %v",
+				existing.eIPConfig.ip.LinkIndex, err)
+		}
+		if !isEIPOnLink {
+			for _, routeToDelete := range existing.eIPConfig.routes {
+				c.routeManager.Del(routeToDelete)
+			}
+		}
+	} else if update != nil && update.eIPConfig != nil && len(update.eIPConfig.routes) > 0 &&
+		existing.eIPConfig != nil && len(existing.eIPConfig.routes) > 0 {
+		// delete delta between existing and update
+		routesToDelete := routeDifference(existing.eIPConfig.routes, update.eIPConfig.routes)
+		for _, routeToDelete := range routesToDelete {
+			c.routeManager.Del(routeToDelete)
+		}
 	}
-
 	// apply new changes
-	if update != nil && update.eIPConfig != nil && update.eIPConfig.ip != nil && update.eIPConfig.routeLink != nil {
+	if update != nil && update.eIPConfig != nil && update.eIPConfig.ip != nil && len(update.eIPConfig.routes) > 0 {
 		for updatedTargetNS, updatedTargetPod := range update.namespacesWithPods {
 			existingNs, found := existing.namespacesWithPodIPConfigs[updatedTargetNS]
 			if !found {
@@ -679,8 +713,10 @@ func (c *Controller) updateEIP(existing *state, update *config) error {
 		}
 		existing.eIPConfig.ip = update.eIPConfig.ip
 		// route manager manages retry
-		c.routeManager.Add(*update.eIPConfig.routeLink)
-		existing.eIPConfig.routeLink = update.eIPConfig.routeLink
+		for _, routeToAdd := range update.eIPConfig.routes {
+			c.routeManager.Add(routeToAdd)
+		}
+		existing.eIPConfig.routes = update.eIPConfig.routes
 	}
 	return nil
 }
@@ -740,6 +776,13 @@ func (c *Controller) getAllEIPs() ([]*eipv1.EgressIP, error) {
 	return eips, nil
 }
 
+// addrLink is used to store information for an IP address and its associated link. Only used to implement comparable
+// interface because netlink.Addr does implement comparable
+type addrLink struct {
+	addr      string // IP + mask
+	linkIndex int
+}
+
 // RepairNode generates whats expected and what is seen on the node and removes any stale configuration. This should be
 // called at Controller startup.
 func (c *Controller) RepairNode() error {
@@ -749,10 +792,10 @@ func (c *Controller) RepairNode() error {
 	}
 	// get address map for each interface -> addresses/mask
 	// also map address/mask -> interface name
-	assignedAddr := sets.New[string]()
+	assignedAddr := sets.New[addrLink]()
 	assignedAddrStrToAddrs := make(map[string]netlink.Addr)
 	assignedIPRoutes := sets.New[string]()
-	assignedIPRouteStrToRoutes := make(map[string]routemanager.RoutesPerLink)
+	assignedIPRouteStrToRoutes := make(map[string]netlink.Route)
 	assignedIPRules := sets.New[string]()
 	assignedIPRulesStrToRules := make(map[string]netlink.Rule)
 	assignedIPTableV4Rules := sets.New[string]()
@@ -772,8 +815,8 @@ func (c *Controller) RepairNode() error {
 		for _, address := range addresses {
 			if address.Label == linkmanager.GetAssignedAddressLabel(linkName) {
 				assignedAddrFound = true
-				addressStr := address.String()
-				assignedAddr.Insert(addressStr)
+				addressStr := address.IPNet.String()
+				assignedAddr.Insert(addrLink{address.IPNet.String(), address.LinkIndex})
 				assignedAddrStrToAddrs[addressStr] = address
 			}
 		}
@@ -786,11 +829,9 @@ func (c *Controller) RepairNode() error {
 			return fmt.Errorf("unable to get route list using filter (%s): %v", filter.String(), err)
 		}
 		for _, existingRoute := range existingRoutes {
-			route := routemanager.ConvertNetlinkRouteToRoute(existingRoute)
-			routeStr := route.String()
+			routeStr := existingRoute.String()
 			assignedIPRoutes.Insert(routeStr)
-			assignedIPRouteStrToRoutes[routeStr] = routemanager.RoutesPerLink{Link: link,
-				Routes: []routemanager.Route{route}}
+			assignedIPRouteStrToRoutes[routeStr] = existingRoute
 		}
 	}
 	filter, mask := filterRuleByPriority(rulePriority)
@@ -824,7 +865,7 @@ func (c *Controller) RepairNode() error {
 		assignedIPTablesV6StrToRules[ruleStr] = rule
 	}
 
-	expectedAddrs := sets.New[string]()
+	expectedAddrs := sets.New[addrLink]()
 	expectedIPRoutes := sets.New[string]()
 	expectedIPRules := sets.New[string]()
 	expectedIPTableV4Rules := sets.New[string]()
@@ -867,8 +908,16 @@ func (c *Controller) RepairNode() error {
 			}
 			linkIdx := link.Attrs().Index
 			linkName := link.Attrs().Name
-			expectedIPRoutes.Insert(getDefaultRoute(linkIdx, isEIPV6).String())
-			expectedAddrs.Insert(getNetlinkAddressWithLabel(eIPNet, linkIdx, linkName).String())
+			// copy routes associated with link to new route table
+			linkRoutes, err := generateRoutesForLink(link, isEIPV6)
+			if err != nil {
+				return fmt.Errorf("failed to generate IP routes for link %s for EgressIP %s IP %s: %v", linkName,
+					egressIP.Name, eIPNet.IP.String(), err)
+			}
+			for _, route := range linkRoutes {
+				expectedIPRoutes.Insert(route.String())
+			}
+			expectedAddrs.Insert(addrLink{eIPNet.String(), linkIdx})
 			namespaceSelector, err := metav1.LabelSelectorAsSelector(&egressIP.Spec.NamespaceSelector)
 			if err != nil {
 				return fmt.Errorf("invalid namespaceSelector for egress IP %s: %v", egressIP.Name, err)
@@ -923,10 +972,12 @@ func (c *Controller) RepairNode() error {
 	if err := c.removeStaleAddresses(staleAddresses, assignedAddrStrToAddrs); err != nil {
 		return fmt.Errorf("failed to remove stale Egress IP addresse(s) (%+v): %v", staleAddresses, err)
 	}
+
 	staleIPRoutes := assignedIPRoutes.Difference(expectedIPRoutes)
 	if err := c.removeStaleIPRoutes(staleIPRoutes, assignedIPRouteStrToRoutes); err != nil {
 		return fmt.Errorf("failed to remove stale IP route(s) (%+v): %v", staleIPRoutes, err)
 	}
+
 	staleIPRules := assignedIPRules.Difference(expectedIPRules)
 	if err := c.removeStaleIPRules(staleIPRules, assignedIPRulesStrToRules); err != nil {
 		return fmt.Errorf("failed to remove stale IP rule(s) (%+v): %v", staleIPRules, err)
@@ -952,9 +1003,9 @@ func isEIPStatusItemValid(status eipv1.EgressIPStatusItem, nodeName string) bool
 	return true
 }
 
-func (c *Controller) removeStaleAddresses(staleAddresses sets.Set[string], addrStrToNetlinkAddr map[string]netlink.Addr) error {
+func (c *Controller) removeStaleAddresses(staleAddresses sets.Set[addrLink], addrStrToNetlinkAddr map[string]netlink.Addr) error {
 	for _, address := range staleAddresses.UnsortedList() {
-		nlAddr, ok := addrStrToNetlinkAddr[address]
+		nlAddr, ok := addrStrToNetlinkAddr[address.addr]
 		if !ok {
 			return fmt.Errorf("expected to find address %q in map: %+v", address, addrStrToNetlinkAddr)
 		}
@@ -965,7 +1016,7 @@ func (c *Controller) removeStaleAddresses(staleAddresses sets.Set[string], addrS
 	return nil
 }
 
-func (c *Controller) removeStaleIPRoutes(staleIPRoutes sets.Set[string], routeStrToNetlinkRoute map[string]routemanager.RoutesPerLink) error {
+func (c *Controller) removeStaleIPRoutes(staleIPRoutes sets.Set[string], routeStrToNetlinkRoute map[string]netlink.Route) error {
 	for _, ipRoute := range staleIPRoutes.UnsortedList() {
 		route, ok := routeStrToNetlinkRoute[ipRoute]
 		if !ok {
@@ -1018,6 +1069,61 @@ func (c *Controller) isIPSupported(isIPV6 bool) bool {
 		return true
 	}
 	return false
+}
+
+// routeDifference returns a slice of routes from routesA that are not in routesB.
+// Assumes non-duplicate routes in each slice.
+// For example:
+// routesA = {a1, a2, a3}
+// routesB = {a1, a2, a4, a5}
+// routesDifference(routesA, routesB) = {a3}
+// routesDifference(routesA, routesB) = {a4, a5}
+func routeDifference(routesA, routesB []netlink.Route) []netlink.Route {
+	diff := make([]netlink.Route, 0)
+	var found bool
+	for _, routeA := range routesA {
+		found = false
+		for _, routeB := range routesB {
+			if routemanager.RoutePartiallyEqual(routeA, routeB) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			diff = append(diff, routeA)
+		}
+	}
+	return diff
+}
+
+func ensureAtLeastOneDefaultRoute(routes []netlink.Route, linkIndex int, isV6 bool) []netlink.Route {
+	var defaultCIDR *net.IPNet
+	if isV6 {
+		defaultCIDR = defaultV6AnyCIDR
+	} else {
+		defaultCIDR = defaultV4AnyCIDR
+	}
+	var defaultRouteFound bool
+	for _, route := range routes {
+		if route.Dst != nil {
+			if route.Dst.IP.Equal(defaultCIDR.IP) {
+				ones, _ := route.Dst.Mask.Size()
+				if ones == 0 {
+					defaultRouteFound = true
+				}
+			}
+		}
+	}
+	if !defaultRouteFound {
+		routes = append(routes, netlink.Route{LinkIndex: linkIndex, Dst: defaultCIDR})
+	}
+	return routes
+}
+
+func overwriteRoutesTableID(routes []netlink.Route, tableID int) {
+	for i := range routes {
+		routes[i].Table = tableID
+	}
 }
 
 func getRouteTableID(ifIndex int) int {
@@ -1133,25 +1239,6 @@ func getNetlinkAddress(addr *net.IPNet, ifindex int) *netlink.Addr {
 	}
 }
 
-func getDefaultRouteForLink(link netlink.Link, v6 bool) *routemanager.RoutesPerLink {
-	return &routemanager.RoutesPerLink{Link: link,
-		Routes: []routemanager.Route{
-			getDefaultRoute(link.Attrs().Index, v6),
-		},
-	}
-}
-
-func getDefaultRoute(linkIdx int, v6 bool) routemanager.Route {
-	anyCIDR := defaultV4AnyCIDR
-	if v6 {
-		anyCIDR = defaultV6AnyCIDR
-	}
-	return routemanager.Route{
-		Table:  getRouteTableID(linkIdx),
-		Subnet: anyCIDR,
-	}
-}
-
 // generateIPRules generates IP rules at a predefined priority for each pod IP with a custom routing table based
 // from the links 'ifindex'
 func generateIPRule(srcIP net.IP, isIPv6 bool, ifIndex int) netlink.Rule {
@@ -1198,4 +1285,28 @@ func generateIPTablesSNATRuleArg(srcIP net.IP, isIPv6 bool, infName, snatIP stri
 		srcIPFullMask = fmt.Sprintf("%s/32", srcIP.String())
 	}
 	return iptables.RuleArg{Args: []string{"-s", srcIPFullMask, "-o", infName, "-j", "SNAT", "--to-source", snatIP}}
+}
+
+func getIPFamily(v6 bool) int {
+	if v6 {
+		return netlink.FAMILY_V6
+	}
+	return netlink.FAMILY_V4
+}
+
+func isEgressIPOnLink(linkIndex, ipFamily int) (bool, error) {
+	link, err := netlink.LinkByIndex(linkIndex)
+	if err != nil {
+		return false, err
+	}
+	addresses, err := netlink.AddrList(link, ipFamily)
+	if err != nil {
+		return false, err
+	}
+	for _, address := range addresses {
+		if address.Label == linkmanager.GetAssignedAddressLabel(link.Attrs().Name) {
+			return true, nil
+		}
+	}
+	return false, nil
 }
