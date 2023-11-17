@@ -63,7 +63,7 @@ type eIPConfig struct {
 	// EgressIP name
 	name string
 	// EgressIP IP
-	ip     *netlink.Addr
+	addr   *netlink.Addr
 	routes []netlink.Route
 }
 
@@ -575,7 +575,7 @@ func generateEIPConfigForPods(pods map[ktypes.NamespacedName][]net.IP, link netl
 		return nil, nil, err
 	}
 	eipConfig.routes = linkRoutes
-	eipConfig.ip = getNetlinkAddress(eIPNet, link.Attrs().Index)
+	eipConfig.addr = getNetlinkAddress(eIPNet, link.Attrs().Index)
 	for _, podIPs := range pods {
 		for _, podIP := range podIPs {
 			isPodIPv6 := utilnet.IsIPv6(podIP)
@@ -661,24 +661,24 @@ func (c *Controller) updateEIP(existing *state, update *config) error {
 	// Delete addresses and routes under the following conditions
 	// 1. existing contains a non nil IP and update is nil
 	// 2. existing contains an ip and update contains an ip and update contains an ip different to existing
-	if (update == nil && existing.eIPConfig != nil && existing.eIPConfig.ip != nil) ||
-		(update != nil && update.eIPConfig != nil && update.eIPConfig.ip != nil &&
-			existing.eIPConfig != nil && existing.eIPConfig.ip != nil && !existing.eIPConfig.ip.Equal(*update.eIPConfig.ip)) {
+	if (update == nil && existing.eIPConfig != nil && existing.eIPConfig.addr != nil) ||
+		(update != nil && update.eIPConfig != nil && update.eIPConfig.addr != nil &&
+			existing.eIPConfig != nil && existing.eIPConfig.addr != nil && !existing.eIPConfig.addr.Equal(*update.eIPConfig.addr)) {
 
-		if err := c.linkManager.DelAddress(*existing.eIPConfig.ip); err != nil {
+		if err := c.linkManager.DelAddress(*existing.eIPConfig.addr); err != nil {
 			// TODO(mk): if we fail to delete address, handle it
-			return fmt.Errorf("failed to delete egress IP address %s: %w", existing.eIPConfig.ip.String(), err)
+			return fmt.Errorf("failed to delete egress IP address %s: %w", existing.eIPConfig.addr.String(), err)
 		}
-		if err := c.deleteIPFromAnnotation(existing.eIPConfig.ip.IP.String()); err != nil {
-			return fmt.Errorf("failed to delete egress IP address %s from annotation: %v", existing.eIPConfig.ip.String(), err)
+		if err := c.deleteIPFromAnnotation(existing.eIPConfig.addr.IP.String()); err != nil {
+			return fmt.Errorf("failed to delete egress IP address %s from annotation: %v", existing.eIPConfig.addr.String(), err)
 		}
 	}
 	// delete stale routes
 	// existing routes need to be deleted if there's no update and if there's no other active egress IP on this link.
-	if update == nil && existing.eIPConfig != nil && len(existing.eIPConfig.routes) > 0 && existing.eIPConfig.ip != nil {
+	if update == nil && existing.eIPConfig != nil && len(existing.eIPConfig.routes) > 0 && existing.eIPConfig.addr != nil {
 		// Egress IP for this config and link should already be deleted in steps previously.
 		// If there is different Egress IP active on this link, we do not want to delete the routes needed for that other egress IP.
-		ipFamily := getIPFamily(utilnet.IsIPv6(existing.eIPConfig.ip.IP))
+		ipFamily := getIPFamily(utilnet.IsIPv6(existing.eIPConfig.addr.IP))
 		assignedEIPs, err := c.getAnnotation()
 		if err != nil {
 			return fmt.Errorf("failed to assigned egress IPs from annotation: %v", err)
@@ -686,10 +686,10 @@ func (c *Controller) updateEIP(existing *state, update *config) error {
 		// within test cases there is a race between node lister getting updated with the new annotation set previously,
 		// (with the removed EIP IP) and retrieving it again here. Ensure the current EIP is removed from the set.
 		assignedEIPs.Delete(existing.eIPConfig.addr.IP.String())
-		isEIPOnLink, err := isEgressIPOnLink(existing.eIPConfig.ip.LinkIndex, ipFamily, assignedEIPs)
+		isEIPOnLink, err := isEgressIPOnLink(existing.eIPConfig.addr.LinkIndex, ipFamily, assignedEIPs)
 		if err != nil {
 			return fmt.Errorf("failed to determine if link with index %d hosts an existing Egress IP: %v",
-				existing.eIPConfig.ip.LinkIndex, err)
+				existing.eIPConfig.addr.LinkIndex, err)
 		}
 		if !isEIPOnLink {
 			for _, routeToDelete := range existing.eIPConfig.routes {
@@ -705,7 +705,7 @@ func (c *Controller) updateEIP(existing *state, update *config) error {
 		}
 	}
 	// apply new changes
-	if update != nil && update.eIPConfig != nil && update.eIPConfig.ip != nil && len(update.eIPConfig.routes) > 0 {
+	if update != nil && update.eIPConfig != nil && update.eIPConfig.addr != nil && len(update.eIPConfig.routes) > 0 {
 		for updatedTargetNS, updatedTargetPod := range update.namespacesWithPods {
 			existingNs, found := existing.namespacesWithPodIPConfigs[updatedTargetNS]
 			if !found {
@@ -730,10 +730,10 @@ func (c *Controller) updateEIP(existing *state, update *config) error {
 		}
 		// TODO(mk): only apply the follow when its new config or when it failed to apply
 		// Ok to repeat requests to route manager and link manager
-		if err := c.linkManager.AddAddress(*update.eIPConfig.ip); err != nil {
+		if err := c.linkManager.AddAddress(*update.eIPConfig.addr); err != nil {
 			return fmt.Errorf("failed to add address to link: %v", err)
 		}
-		existing.eIPConfig.ip = update.eIPConfig.ip
+		existing.eIPConfig.addr = update.eIPConfig.addr
 		// route manager manages retry
 		for _, routeToAdd := range update.eIPConfig.routes {
 			c.routeManager.Add(routeToAdd)
