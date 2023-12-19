@@ -307,11 +307,15 @@ func configureSvcRouteViaInterface(routeManager *routemanager.Controller, iface 
 
 	var routes []routemanager.Route
 	for _, subnet := range config.Kubernetes.ServiceCIDRs {
-		gwIP, err := util.MatchIPFamily(utilnet.IsIPv6CIDR(subnet), gwIPs)
+		isV6 := utilnet.IsIPv6CIDR(subnet)
+		gwIP, err := util.MatchIPFamily(isV6, gwIPs)
 		if err != nil {
 			return fmt.Errorf("unable to find gateway IP for subnet: %v, found IPs: %v", subnet, gwIPs)
 		}
-
+		srcIP := config.Gateway.MasqueradeIPs.V4HostMasqueradeIP
+		if isV6 {
+			srcIP = config.Gateway.MasqueradeIPs.V6HostMasqueradeIP
+		}
 		// Remove MTU from service route once https://bugzilla.redhat.com/show_bug.cgi?id=2169839 is fixed.
 		mtu := config.Default.MTU
 		if config.Default.RoutableMTU != 0 {
@@ -323,7 +327,7 @@ func configureSvcRouteViaInterface(routeManager *routemanager.Controller, iface 
 			GwIP:   gwIPCopy,
 			Subnet: &subnetCopy,
 			MTU:    mtu,
-			SrcIP:  nil,
+			SrcIP:  srcIP,
 		})
 	}
 	if len(routes) > 0 {

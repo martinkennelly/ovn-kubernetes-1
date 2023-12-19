@@ -3,6 +3,7 @@ package node
 import (
 	"fmt"
 	"hash/fnv"
+	"math"
 	"net"
 	"reflect"
 	"strings"
@@ -98,8 +99,10 @@ type serviceConfig struct {
 }
 
 type cidrAndFlags struct {
-	ipNet *net.IPNet
-	flags int
+	ipNet             *net.IPNet
+	flags             int
+	preferredLifetime int
+	validLifetime     int
 }
 
 func (npw *nodePortWatcher) updateGatewayIPs(addressManager *addressManager) {
@@ -2026,12 +2029,20 @@ func setNodeMasqueradeIPOnExtBridge(extBridgeName string) error {
 	if config.IPv6Mode {
 		_, masqIPNet, _ := net.ParseCIDR(config.Gateway.V6MasqueradeSubnet)
 		masqIPNet.IP = config.Gateway.MasqueradeIPs.V6HostMasqueradeIP
-		bridgeCIDRs = append(bridgeCIDRs, cidrAndFlags{ipNet: masqIPNet, flags: unix.IFA_F_NODAD})
+		// Depreciate the IPv6 host masquerade IP address to ensure its not used in source address selection except
+		// if a route explicitly sets its src IP as this masquerade IP. See RFC 3484 for more details for linux src address selection.
+		// Currently, we set a route with destination as the service CIDR with source IP as the host masquerade IP.
+		// Also, ideally we would only set the preferredLifetime to 0, but because this is the default value of this type, the netlink lib
+		// will only propagate preferred lifetime to netlink if either preferred lifetime or valid lifetime is set greater than 0.
+		// Set valid lifetime to max will achieve our goal of setting preferred lifetime 0.
+		bridgeCIDRs = append(bridgeCIDRs, cidrAndFlags{ipNet: masqIPNet, flags: unix.IFA_F_NODAD, preferredLifetime: 0,
+			validLifetime: math.MaxInt64})
 	}
 
 	for _, bridgeCIDR := range bridgeCIDRs {
 		if exists, err := util.LinkAddrExist(extBridge, bridgeCIDR.ipNet); err == nil && !exists {
-			if err := util.LinkAddrAdd(extBridge, bridgeCIDR.ipNet, bridgeCIDR.flags); err != nil {
+			if err := util.LinkAddrAdd(extBridge, bridgeCIDR.ipNet, bridgeCIDR.flags, bridgeCIDR.preferredLifetime,
+				bridgeCIDR.validLifetime); err != nil {
 				return err
 			}
 		} else if err != nil {

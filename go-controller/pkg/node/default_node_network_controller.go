@@ -998,19 +998,22 @@ func (nc *DefaultNodeNetworkController) Start(ctx context.Context) error {
 						return fmt.Errorf("unable to get link for %s, error: %v", types.K8sMgmtIntfName, err)
 					}
 					var gwIP net.IP
+					var srcIP net.IP
 					var routes []routemanager.Route
 					for _, subnet := range config.Kubernetes.ServiceCIDRs {
 						if utilnet.IsIPv4CIDR(subnet) {
 							gwIP = mgmtPortConfig.ipv4.gwIP
+							srcIP = config.Gateway.MasqueradeIPs.V4HostMasqueradeIP
 						} else {
 							gwIP = mgmtPortConfig.ipv6.gwIP
+							srcIP = config.Gateway.MasqueradeIPs.V6HostMasqueradeIP
 						}
 						subnet := *subnet
 						routes = append(routes, routemanager.Route{
 							GwIP:   gwIP,
 							Subnet: &subnet,
 							MTU:    config.Default.RoutableMTU,
-							SrcIP:  nil,
+							SrcIP:  srcIP,
 						})
 					}
 					nc.routeManager.Add(routemanager.RoutesPerLink{Link: link, Routes: routes})
@@ -1411,7 +1414,11 @@ func upgradeServiceRoute(routeManager *routemanager.Controller, bridgeName strin
 	}
 	for _, serviceCIDR := range config.Kubernetes.ServiceCIDRs {
 		serviceCIDR := *serviceCIDR
-		routeManager.Add(routemanager.RoutesPerLink{Link: link, Routes: []routemanager.Route{{Subnet: &serviceCIDR}}})
+		srcIP := config.Gateway.MasqueradeIPs.V4HostMasqueradeIP
+		if utilnet.IsIPv6CIDR(&serviceCIDR) {
+			srcIP = config.Gateway.MasqueradeIPs.V6HostMasqueradeIP
+		}
+		routeManager.Add(routemanager.RoutesPerLink{Link: link, Routes: []routemanager.Route{{Subnet: &serviceCIDR, SrcIP: srcIP}}})
 	}
 
 	// add route via OVS bridge
