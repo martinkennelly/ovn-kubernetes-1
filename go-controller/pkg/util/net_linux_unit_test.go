@@ -651,6 +651,9 @@ func TestLinkNeighAdd(t *testing.T) {
 	mockLink := new(netlink_mocks.Link)
 	// below is defined in net_linux.go
 	netLinkOps = mockNetLinkOps
+	ip := ovntest.MustParseIP("1.1.1.1")
+	mac := ovntest.MustParseMAC("3A-85-87-F6-28-AA")
+
 	tests := []struct {
 		desc                     string
 		inputLink                netlink.Link
@@ -667,8 +670,10 @@ func TestLinkNeighAdd(t *testing.T) {
 			errExp:    true,
 			onRetArgsNetLinkLibOpers: []ovntest.TestifyMockHelper{
 				{OnCallMethodName: "NeighAdd", OnCallMethodArgType: []string{"*netlink.Neigh"}, RetArgList: []interface{}{fmt.Errorf("mock error")}},
+				{OnCallMethodName: "NeighList", OnCallMethodArgType: []string{"int", "int"}, RetArgList: []interface{}{[]netlink.Neigh{}, nil}},
 			},
 			onRetArgsLinkIfaceOpers: []ovntest.TestifyMockHelper{
+				{OnCallMethodName: "Attrs", OnCallMethodArgType: []string{}, RetArgList: []interface{}{&netlink.LinkAttrs{Name: "testIfaceName", Index: 1}}},
 				{OnCallMethodName: "Attrs", OnCallMethodArgType: []string{}, RetArgList: []interface{}{&netlink.LinkAttrs{Name: "testIfaceName", Index: 1}}},
 			},
 		},
@@ -677,6 +682,21 @@ func TestLinkNeighAdd(t *testing.T) {
 			inputLink: mockLink,
 			onRetArgsNetLinkLibOpers: []ovntest.TestifyMockHelper{
 				{OnCallMethodName: "NeighAdd", OnCallMethodArgType: []string{"*netlink.Neigh"}, RetArgList: []interface{}{nil}},
+				{OnCallMethodName: "NeighList", OnCallMethodArgType: []string{"int", "int"}, RetArgList: []interface{}{[]netlink.Neigh{}, nil}},
+			},
+			onRetArgsLinkIfaceOpers: []ovntest.TestifyMockHelper{
+				{OnCallMethodName: "Attrs", OnCallMethodArgType: []string{}, RetArgList: []interface{}{&netlink.LinkAttrs{Name: "testIfaceName", Index: 1}}},
+				{OnCallMethodName: "Attrs", OnCallMethodArgType: []string{}, RetArgList: []interface{}{&netlink.LinkAttrs{Name: "testIfaceName", Index: 1}}},
+			},
+		},
+		{
+			desc:         "test code path where no attempt is made to add neighbour entry because it already exists",
+			inputLink:    mockLink,
+			inputNeigIP:  ip,
+			inputMacAddr: mac,
+			onRetArgsNetLinkLibOpers: []ovntest.TestifyMockHelper{
+				{OnCallMethodName: "NeighList", OnCallMethodArgType: []string{"int", "int"}, RetArgList: []interface{}{[]netlink.Neigh{
+					{IP: ip, HardwareAddr: mac, State: netlink.NUD_PERMANENT}}, nil}},
 			},
 			onRetArgsLinkIfaceOpers: []ovntest.TestifyMockHelper{
 				{OnCallMethodName: "Attrs", OnCallMethodArgType: []string{}, RetArgList: []interface{}{&netlink.LinkAttrs{Name: "testIfaceName", Index: 1}}},
@@ -690,6 +710,66 @@ func TestLinkNeighAdd(t *testing.T) {
 			ovntest.ProcessMockFnList(&mockLink.Mock, tc.onRetArgsLinkIfaceOpers)
 
 			err := LinkNeighAdd(tc.inputLink, tc.inputNeigIP, tc.inputMacAddr)
+			t.Log(err)
+			if tc.errExp {
+				assert.Error(t, err)
+			} else {
+				assert.Nil(t, err)
+			}
+			mockNetLinkOps.AssertExpectations(t)
+			mockLink.AssertExpectations(t)
+		})
+	}
+}
+
+func TestLinkNeighDel(t *testing.T) {
+	mockNetLinkOps := new(mocks.NetLinkOps)
+	mockLink := new(netlink_mocks.Link)
+	// below is defined in net_linux.go
+	netLinkOps = mockNetLinkOps
+	ip := ovntest.MustParseIP("1.1.1.1")
+	mac := ovntest.MustParseMAC("3A-85-87-F6-28-AA")
+
+	tests := []struct {
+		desc                     string
+		inputLink                netlink.Link
+		inputNeigIP              net.IP
+		errExp                   bool
+		onRetArgsNetLinkLibOpers []ovntest.TestifyMockHelper
+		onRetArgsLinkIfaceOpers  []ovntest.TestifyMockHelper
+	}{
+		{
+			desc:        "test code path where del neighbor returns success when entry exists",
+			inputLink:   mockLink,
+			inputNeigIP: ip,
+			onRetArgsNetLinkLibOpers: []ovntest.TestifyMockHelper{
+				{OnCallMethodName: "NeighDel", OnCallMethodArgType: []string{"*netlink.Neigh"}, RetArgList: []interface{}{nil}},
+				{OnCallMethodName: "NeighList", OnCallMethodArgType: []string{"int", "int"}, RetArgList: []interface{}{[]netlink.Neigh{
+					{IP: ip, HardwareAddr: mac, State: netlink.NUD_PERMANENT}}, nil}},
+			},
+			onRetArgsLinkIfaceOpers: []ovntest.TestifyMockHelper{
+				{OnCallMethodName: "Attrs", OnCallMethodArgType: []string{}, RetArgList: []interface{}{&netlink.LinkAttrs{Name: "testIfaceName", Index: 1}}},
+			},
+		},
+		{
+			desc:        "test code path where no attempt is made to del neighbour entry because it does not exist",
+			inputLink:   mockLink,
+			inputNeigIP: ip,
+			onRetArgsNetLinkLibOpers: []ovntest.TestifyMockHelper{
+				{OnCallMethodName: "NeighList", OnCallMethodArgType: []string{"int", "int"}, RetArgList: []interface{}{[]netlink.Neigh{}, nil}},
+			},
+			onRetArgsLinkIfaceOpers: []ovntest.TestifyMockHelper{
+				{OnCallMethodName: "Attrs", OnCallMethodArgType: []string{}, RetArgList: []interface{}{&netlink.LinkAttrs{Name: "testIfaceName", Index: 1}}},
+			},
+		},
+	}
+	for i, tc := range tests {
+		t.Run(fmt.Sprintf("%d:%s", i, tc.desc), func(t *testing.T) {
+
+			ovntest.ProcessMockFnList(&mockNetLinkOps.Mock, tc.onRetArgsNetLinkLibOpers)
+			ovntest.ProcessMockFnList(&mockLink.Mock, tc.onRetArgsLinkIfaceOpers)
+
+			err := LinkNeighDel(tc.inputLink, tc.inputNeigIP)
 			t.Log(err)
 			if tc.errExp {
 				assert.Error(t, err)

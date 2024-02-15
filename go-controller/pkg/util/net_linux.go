@@ -355,22 +355,38 @@ func LinkRouteExists(link netlink.Link, gwIP net.IP, subnet *net.IPNet) (bool, e
 	return route != nil, err
 }
 
-// LinkNeighDel deletes an ip binding for a given link
+// LinkNeighDel deletes an ip binding for a given link. If neigh doesn't exist, no error is returned.
 func LinkNeighDel(link netlink.Link, neighIP net.IP) error {
-	neigh := &netlink.Neigh{
-		LinkIndex: link.Attrs().Index,
+	linkIndex := link.Attrs().Index
+	existingNeighs, err := netLinkOps.NeighList(linkIndex, getFamily(neighIP))
+	if err != nil {
+		return fmt.Errorf("failed to delete neighbour entry for IP %v because unable to list existing neighbour entries: %v", neighIP, err)
+	}
+	delNeigh := &netlink.Neigh{
+		LinkIndex: linkIndex,
 		Family:    getFamily(neighIP),
 		IP:        neighIP,
 	}
-	err := netLinkOps.NeighDel(neigh)
-	if err != nil {
-		return fmt.Errorf("failed to delete neighbour entry %+v: %v", neigh, err)
+	for _, existingNeigh := range existingNeighs {
+		if existingNeigh.IP.Equal(neighIP) {
+			err = netLinkOps.NeighDel(delNeigh)
+			if err != nil {
+				return fmt.Errorf("failed to delete neighbour entry %+v: %v", existingNeigh, err)
+			}
+		}
 	}
 	return nil
 }
 
-// LinkNeighAdd adds MAC/IP bindings for the given link
+// LinkNeighAdd adds MAC/IP bindings for the given link. If neigh already exists, no error is returned.
 func LinkNeighAdd(link netlink.Link, neighIP net.IP, neighMAC net.HardwareAddr) error {
+	exists, err := LinkNeighExists(link, neighIP, neighMAC)
+	if err != nil {
+		return fmt.Errorf("failed to add neighbour entry for IP %v because unable to detect if it already exists: %v", neighIP, err)
+	}
+	if exists {
+		return nil
+	}
 	neigh := &netlink.Neigh{
 		LinkIndex:    link.Attrs().Index,
 		Family:       getFamily(neighIP),
@@ -378,7 +394,7 @@ func LinkNeighAdd(link netlink.Link, neighIP net.IP, neighMAC net.HardwareAddr) 
 		IP:           neighIP,
 		HardwareAddr: neighMAC,
 	}
-	err := netLinkOps.NeighAdd(neigh)
+	err = netLinkOps.NeighAdd(neigh)
 	if err != nil {
 		return fmt.Errorf("failed to add neighbour entry %+v: %v", neigh, err)
 	}
