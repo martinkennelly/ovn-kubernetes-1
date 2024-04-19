@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/ovn-org/ovn-kubernetes/test/e2e/provider"
 	"math/rand"
 	"net"
 	"os"
@@ -35,20 +36,12 @@ import (
 )
 
 const (
-	ovnNamespace   = "ovn-kubernetes"
 	ovnNodeSubnets = "k8s.ovn.org/node-subnets"
 	// ovnNodeZoneNameAnnotation is the node annotation name to store the node zone name.
 	ovnNodeZoneNameAnnotation = "k8s.ovn.org/zone-name"
 )
 
-var containerRuntime = "docker"
 var singleNodePerZoneResult *bool
-
-func init() {
-	if cr, found := os.LookupEnv("CONTAINER_RUNTIME"); found {
-		containerRuntime = cr
-	}
-}
 
 type IpNeighbor struct {
 	Dst    string `dst`
@@ -282,17 +275,11 @@ func externalIPServiceSpecFrom(svcName string, httpPort, updPort, clusterHTTPPor
 	return res
 }
 
-// pokeEndpoint leverages a container running the netexec command to send a "request" to a target running
+// pokeEndpointViaExternalService leverages a container running the netexec command to send a "request" to a target running
 // netexec on the given target host / protocol / port.
 // Returns the response based on the provided "request".
-func pokeEndpoint(namespace, clientContainer, protocol, targetHost string, targetPort int32, request string) string {
+func pokeEndpointViaExternalService(testDeploymentCtx provider.Context, extService provider.ExternalContainer, protocol, targetHost string, targetPort int32, request string) string {
 	ipPort := net.JoinHostPort("localhost", "80")
-	cmd := []string{containerRuntime, "exec", clientContainer}
-	if len(namespace) != 0 {
-		// command is to be run inside a pod, not containerRuntime
-		cmd = []string{"exec", clientContainer, "--"}
-	}
-
 	// we leverage the dial command from netexec, that is already supporting multiple protocols
 	curlCommand := strings.Split(fmt.Sprintf("curl -g -q -s http://%s/dial?request=%s&protocol=%s&host=%s&port=%d&tries=1",
 		ipPort,
@@ -300,16 +287,11 @@ func pokeEndpoint(namespace, clientContainer, protocol, targetHost string, targe
 		protocol,
 		targetHost,
 		targetPort), " ")
-
-	cmd = append(cmd, curlCommand...)
 	var res string
 	var err error
-	if len(namespace) != 0 {
-		res, err = e2ekubectl.RunKubectl(namespace, cmd...)
-	} else {
-		// command is to be run inside runtime container
-		res, err = runCommand(cmd...)
-	}
+	// command is to be run inside runtime container
+	res, err = testDeploymentCtx.ExecExternalContainerCommand(extService, curlCommand)
+
 	framework.ExpectNoError(err, "failed to run command on external container")
 	response, err := parseNetexecResponse(res)
 	if err != nil {
@@ -322,13 +304,42 @@ func pokeEndpoint(namespace, clientContainer, protocol, targetHost string, targe
 	return response
 }
 
+// pokeEndpointViaPod leverages a container running the netexec command to send a "request" to a target running
+// netexec on the given target host / protocol / port.
+// Returns the response based on the provided "request".
+func pokeEndpointViaPod(namespace, podName, protocol, targetHost string, targetPort int32, request string) string {
+	ipPort := net.JoinHostPort("localhost", "80")
+	cmd := []string{"exec", podName, "--"}
+	// we leverage the dial command from netexec, that is already supporting multiple protocols
+	curlCommand := strings.Split(fmt.Sprintf("curl -g -q -s http://%s/dial?request=%s&protocol=%s&host=%s&port=%d&tries=1",
+		ipPort,
+		request,
+		protocol,
+		targetHost,
+		targetPort), " ")
+
+	cmd = append(cmd, curlCommand...)
+	var res string
+	var err error
+	res, err = e2ekubectl.RunKubectl(namespace, cmd...)
+	framework.ExpectNoError(err, "failed to run command within pod")
+	response, err := parseNetexecResponse(res)
+	if err != nil {
+		framework.Logf("FAILED Command was %s", curlCommand)
+		framework.Logf("FAILED Response was %v", res)
+		return ""
+	}
+	framework.ExpectNoError(err)
+	return response
+}
+
 // wrapper logic around pokeEndpoint
 // contact the ExternalIP service until each endpoint returns its hostname and return true, or false otherwise
-func pokeExternalIpService(clientContainerName, protocol, externalAddress string, externalPort int32, maxTries int, nodesHostnames sets.String) bool {
+func pokeExternalIpService(testDeploymentCtx provider.Context, extContainer provider.ExternalContainer, protocol, externalAddress string, externalPort int32, maxTries int, nodesHostnames sets.String) bool {
 	responses := sets.NewString()
 
 	for i := 0; i < maxTries; i++ {
-		epHostname := pokeEndpoint("", clientContainerName, protocol, externalAddress, externalPort, "hostname")
+		epHostname := pokeEndpointViaExternalService(testDeploymentCtx, extContainer, protocol, externalAddress, externalPort, "hostname")
 		responses.Insert(epHostname)
 
 		// each endpoint returns its hostname. By doing this, we validate that each ep was reached at least once.
@@ -343,8 +354,7 @@ func pokeExternalIpService(clientContainerName, protocol, externalAddress string
 // run a few iterations to make sure that the hwaddr is stable
 // we will always run iterations + 1 in the loop to make sure that we have values
 // to compare
-func isNeighborEntryStable(clientContainer, targetHost string, iterations int) bool {
-	cmd := []string{containerRuntime, "exec", clientContainer}
+func isNeighborEntryStable(testDeploymentCtx provider.Context, extContainer provider.ExternalContainer, targetHost string, iterations int) bool {
 	var hwAddrOld string
 	var hwAddrNew string
 	// used for reporting only
@@ -354,14 +364,16 @@ func isNeighborEntryStable(clientContainer, targetHost string, iterations int) b
 	// make sure that we do not get Operation not permitted for neighbor entry deletion,
 	// ignore everything else for the delete and the ping
 	// RTNETLINK answers: Operation not permitted would indicate missing Cap NET_ADMIN
+	primaryInfName := provider.GetPrimaryInfName()
 	script := fmt.Sprintf(
-		"OUTPUT=$(ip neigh del %s dev eth0 2>&1); "+
+		"OUTPUT=$(ip neigh del %s dev %s 2>&1); "+
 			"if [[ \"$OUTPUT\" =~ \"Operation not permitted\" ]]; then "+
 			"echo \"$OUTPUT\";"+
 			"else "+
 			"ping -c1 -W1 %s &>/dev/null; ip -j neigh; "+
 			"fi",
 		targetHost,
+		primaryInfName,
 		targetHost,
 	)
 	command := []string{
@@ -369,12 +381,11 @@ func isNeighborEntryStable(clientContainer, targetHost string, iterations int) b
 		"-c",
 		script,
 	}
-	cmd = append(cmd, command...)
 
 	// run this for time of iterations + 1 to make sure that the entry is stable
 	for i := 0; i <= iterations; i++ {
 		// run the command
-		output, err := runCommand(cmd...)
+		output, err := testDeploymentCtx.ExecExternalContainerCommand(extContainer, command)
 		if err != nil {
 			framework.ExpectNoError(
 				fmt.Errorf("FAILED Command was: %s\nFAILED Response was: %v\nERROR is: %s",

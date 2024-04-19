@@ -3,6 +3,7 @@ package e2e
 import (
 	"flag"
 	"fmt"
+	"github.com/ovn-org/ovn-kubernetes/test/e2e/provider"
 	"os"
 	"path"
 	"testing"
@@ -50,8 +51,14 @@ var _ = ginkgo.BeforeSuite(func() {
 
 	_, err := framework.LoadClientset()
 	framework.ExpectNoError(err)
-	_, err = framework.LoadConfig()
+	config, err := framework.LoadConfig()
 	framework.ExpectNoError(err)
+	provider.Set(config, framework.TestContext.Provider)
+})
+
+var _ = ginkgo.AfterSuite(func() {
+	err := provider.Get().CleanUp()
+	framework.ExpectNoError(err, "failed to cleanup deployment provider resources")
 })
 
 // required due to go1.13 issue: https://github.com/onsi/ginkgo/issues/602
@@ -65,7 +72,8 @@ func TestMain(m *testing.M) {
 		}
 		os.Exit(0)
 	}
-
+	// reset provider to skeleton as Kubernetes test framework expects a supported provider
+	framework.TestContext.Provider = "skeleton"
 	framework.AfterReadingAllFlags(&framework.TestContext)
 
 	// TODO: Deprecating repo-root over time... instead just use gobindata_util.go , see #23987.

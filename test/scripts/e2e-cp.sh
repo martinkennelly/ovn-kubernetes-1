@@ -192,7 +192,7 @@ go test -test.timeout 180m -v . \
         -ginkgo.timeout 3h \
         -ginkgo.flake-attempts ${FLAKE_ATTEMPTS:-2} \
         -ginkgo.skip="${SKIPPED_TESTS}" \
-        -provider skeleton \
+        -provider openshift \
         -kubeconfig ${KUBECONFIG} \
         ${NUM_NODES:+"--num-nodes=${NUM_NODES}"} \
         ${E2E_REPORT_DIR:+"--report-dir=${E2E_REPORT_DIR}"} \

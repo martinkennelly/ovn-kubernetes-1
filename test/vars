@@ -1,0 +1,2 @@
+export KIND_IPV4_SUPPORT=true
+export KIND_IPV6_SUPPORT=true
