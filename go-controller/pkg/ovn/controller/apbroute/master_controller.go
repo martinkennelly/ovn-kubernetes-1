@@ -44,7 +44,7 @@ func NewExternalMasterController(
 	apbRouteInformer adminpolicybasedrouteinformer.AdminPolicyBasedExternalRouteInformer,
 	nodeLister corev1listers.NodeLister,
 	nbClient libovsdbclient.Client,
-	addressSetFactory addressset.AddressSetFactory,
+	addressSetFactory addressset.AddressSetFactoryIPs,
 	controllerName string,
 	zoneID string,
 ) (*ExternalGatewayMasterController, error) {

@@ -48,7 +48,7 @@ type Controller struct {
 	nbClient      libovsdbclient.Client
 	eventRecorder record.EventRecorder
 	// An address set factory that creates address sets
-	addressSetFactory addressset.AddressSetFactory
+	addressSetFactory addressset.AddressSetFactoryIPs
 	// pass in the isPodScheduledinLocalZone util from bnc - used only to determine
 	// what zones the pods are in.
 	// isPodScheduledinLocalZone returns whether the provided pod is in a zone local to the zone controller
@@ -100,7 +100,7 @@ func NewController(
 	banpInformer anpinformer.BaselineAdminNetworkPolicyInformer,
 	namespaceInformer corev1informers.NamespaceInformer,
 	podInformer corev1informers.PodInformer,
-	addressSetFactory addressset.AddressSetFactory,
+	addressSetFactory addressset.AddressSetFactoryIPs,
 	isPodScheduledinLocalZone func(*v1.Pod) bool,
 	zone string,
 	recorder record.EventRecorder) (*Controller, error) {

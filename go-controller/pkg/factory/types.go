@@ -56,6 +56,7 @@ type NodeWatchFactory interface {
 	PodCoreInformer() coreinformers.PodInformer
 	APBRouteInformer() adminpolicybasedrouteinformer.AdminPolicyBasedExternalRouteInformer
 	EgressIPInformer() egressipinformer.EgressIPInformer
+	EgressIPTrafficInformer() egressipinformer.EgressIPTrafficInformer
 
 	GetPods(namespace string) ([]*kapi.Pod, error)
 	GetPod(namespace, name string) (*kapi.Pod, error)

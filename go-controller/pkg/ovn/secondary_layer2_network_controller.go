@@ -29,7 +29,7 @@ func NewSecondaryLayer2NetworkController(cnci *CommonNetworkControllerInfo, netI
 	stopChan := make(chan struct{})
 
 	ipv4Mode, ipv6Mode := netInfo.IPMode()
-	addressSetFactory := addressset.NewOvnAddressSetFactory(cnci.nbClient, ipv4Mode, ipv6Mode)
+	addressSetFactory := addressset.NewOvnAddressSetFactoryForIPs(cnci.nbClient, ipv4Mode, ipv6Mode)
 
 	oc := &SecondaryLayer2NetworkController{
 		BaseSecondaryLayer2NetworkController{
@@ -42,7 +42,7 @@ func NewSecondaryLayer2NetworkController(cnci *CommonNetworkControllerInfo, netI
 					logicalPortCache:            newPortCache(stopChan),
 					namespaces:                  make(map[string]*namespaceInfo),
 					namespacesMutex:             sync.Mutex{},
-					addressSetFactory:           addressSetFactory,
+					addressSetFactoryIPs:        addressSetFactory,
 					networkPolicies:             syncmap.NewSyncMap[*networkPolicy](),
 					sharedNetpolPortGroups:      syncmap.NewSyncMap[*defaultDenyPortGroups](),
 					podSelectorAddressSets:      syncmap.NewSyncMap[*PodSelectorAddressSet](),

@@ -114,8 +114,8 @@ type BaseNetworkController struct {
 	namespaces      map[string]*namespaceInfo
 	namespacesMutex sync.Mutex
 
-	// An address set factory that creates address sets
-	addressSetFactory addressset.AddressSetFactory
+	// An address set factory that creates address sets with IPs
+	addressSetFactoryIPs addressset.AddressSetFactoryIPs
 
 	// topology version of this network. It is first retrieved from network logical entities,
 	// and will eventually updated to latest version once topology upgrade is done.
@@ -136,6 +136,8 @@ type BaseNetworkController struct {
 	sharedNetpolPortGroups *syncmap.SyncMap[*defaultDenyPortGroups]
 
 	podSelectorAddressSets *syncmap.SyncMap[*PodSelectorAddressSet]
+
+	eipDstNetworks *syncmap.SyncMap[string]
 
 	// stopChan per controller
 	stopChan chan struct{}

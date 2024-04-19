@@ -26,6 +26,7 @@ func hasResourceAnUpdateFunc(objType reflect.Type) bool {
 	case factory.PodType,
 		factory.NodeType,
 		factory.EgressIPType,
+		factory.EgressIPTrafficType,
 		factory.EgressIPNamespaceType,
 		factory.EgressIPPodType,
 		factory.EgressNodeType,
@@ -90,6 +91,7 @@ func (h *baseNetworkControllerEventHandler) areResourcesEqual(objType reflect.Ty
 		return reflect.DeepEqual(oldEgressFirewall.Spec, newEgressFirewall.Spec), nil
 
 	case factory.EgressIPType,
+		factory.EgressIPTrafficType,
 		factory.EgressIPNamespaceType,
 		factory.EgressNodeType:
 		// force update path for EgressIP resource.
@@ -165,6 +167,9 @@ func (h *baseNetworkControllerEventHandler) getResourceFromInformerCache(objType
 	case factory.EgressIPType:
 		obj, err = watchFactory.GetEgressIP(name)
 
+	case factory.EgressIPTrafficType:
+		obj, err = watchFactory.GetEgressIPTraffic(name)
+
 	case factory.MultiNetworkPolicyType:
 		obj, err = watchFactory.GetMultiNetworkPolicy(namespace, name)
 
@@ -192,6 +197,7 @@ func needsUpdateDuringRetry(objType reflect.Type) bool {
 	case factory.EgressNodeType,
 		factory.EgressFwNodeType,
 		factory.EgressIPType,
+		factory.EgressIPTrafficType,
 		factory.EgressIPPodType,
 		factory.EgressIPNamespaceType,
 		factory.MultiNetworkPolicyType:

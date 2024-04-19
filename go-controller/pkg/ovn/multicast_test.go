@@ -630,7 +630,7 @@ var _ = ginkgo.Describe("OVN Multicast with IP Address Family", func() {
 					expectedData := getMulticastPolicyExpectedData(namespace1.Name, ports)
 					expectedData = append(expectedData, getExpectedDataPodsAndSwitches(tPods, []string{nodeName})...)
 					gomega.Eventually(fakeOvn.nbClient).Should(libovsdb.HaveData(expectedData...))
-					fakeOvn.asf.ExpectAddressSetWithIPs(namespace1.Name, tPodIPs)
+					fakeOvn.asfIPs.ExpectAddressSetWithIPs(namespace1.Name, tPodIPs)
 					return nil
 				}
 
@@ -736,7 +736,7 @@ var _ = ginkgo.Describe("OVN Multicast with IP Address Family", func() {
 						gomega.Expect(err).NotTo(gomega.HaveOccurred())
 					}
 					// Check pods were added
-					fakeOvn.asf.EventuallyExpectAddressSetWithIPs(namespace1.Name, tPodIPs)
+					fakeOvn.asfIPs.EventuallyExpectAddressSetWithIPs(namespace1.Name, tPodIPs)
 					expectedDataWithPods := getMulticastPolicyExpectedData(namespace1.Name, ports)
 					expectedDataWithPods = append(expectedDataWithPods, getExpectedDataPodsAndSwitches(tPods, []string{nodeName})...)
 					gomega.Eventually(fakeOvn.nbClient).Should(libovsdb.HaveData(expectedDataWithPods...))
@@ -747,7 +747,7 @@ var _ = ginkgo.Describe("OVN Multicast with IP Address Family", func() {
 							tPod.podName, *metav1.NewDeleteOptions(0))
 						gomega.Expect(err).NotTo(gomega.HaveOccurred())
 					}
-					fakeOvn.asf.EventuallyExpectEmptyAddressSetExist(namespace1.Name)
+					fakeOvn.asfIPs.EventuallyExpectEmptyAddressSetExist(namespace1.Name)
 					gomega.Eventually(fakeOvn.nbClient).Should(libovsdb.HaveData(expectedDataWithoutPods))
 
 					return nil

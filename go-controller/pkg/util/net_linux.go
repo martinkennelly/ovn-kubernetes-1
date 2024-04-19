@@ -657,6 +657,47 @@ func IsIPNetEqual(ipn1 *net.IPNet, ipn2 *net.IPNet) bool {
 	return m1 == m2 && ipn1.IP.Equal(ipn2.IP)
 }
 
+func ParseCIDRs(cidrsStr []string) ([]*net.IPNet, error) {
+	cidrsIPNet := make([]*net.IPNet, 0, len(cidrsStr))
+	for _, cidrStr := range cidrsStr {
+		_, ipNet, err := net.ParseCIDR(cidrStr)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse CIDR %q: %v", cidrStr, err)
+		}
+		cidrsIPNet = append(cidrsIPNet, ipNet)
+	}
+	return cidrsIPNet, nil
+}
+
+func InsertIPNetNoDupe(ipNets []*net.IPNet, candidateIPNet *net.IPNet) []*net.IPNet {
+	var found bool
+	for _, existingIPNet := range ipNets {
+		if IsIPNetEqual(existingIPNet, candidateIPNet) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		ipNets = append(ipNets, candidateIPNet)
+	}
+	return ipNets
+}
+
+func IsSingleIPFamily(networks []*net.IPNet) bool {
+	var v4, v6 bool
+	for _, network := range networks {
+		if utilnet.IsIPv6CIDR(network) {
+			v6 = true
+		} else {
+			v4 = true
+		}
+	}
+	if v4 && v6 {
+		return false
+	}
+	return true
+}
+
 func filterRouteByDstAndGw(link netlink.Link, subnet *net.IPNet, gw net.IP) (*netlink.Route, uint64) {
 	return &netlink.Route{
 			Dst:       subnet,

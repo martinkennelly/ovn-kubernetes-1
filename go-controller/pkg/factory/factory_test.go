@@ -157,6 +157,17 @@ func newEgressIP(name, namespace string) *egressip.EgressIP {
 
 }
 
+func newEgressIPDestination(name string) *egressip.EgressIPTraffic {
+	return &egressip.EgressIPTraffic{
+		ObjectMeta: newObjectMeta(name, ""),
+		Spec: egressip.EgressIPTrafficSpec{
+			DestinationNetworks: []egressip.CIDR{
+				"192.168.0.0/16",
+			},
+		},
+	}
+}
+
 func newCloudPrivateIPConfig(name string) *ocpcloudnetworkapi.CloudPrivateIPConfig {
 	return &ocpcloudnetworkapi.CloudPrivateIPConfig{
 		ObjectMeta: newObjectMeta(name, ""),
@@ -238,6 +249,13 @@ func egressIPObjSetup(c *egressipfake.Clientset, objType string, listFn func(cor
 	return w
 }
 
+func egressIPDestinationObjSetup(c *egressipfake.Clientset, objType string, listFn func(core.Action) (bool, runtime.Object, error)) *watch.FakeWatcher {
+	w := watch.NewFake()
+	c.AddWatchReactor(objType, core.DefaultWatchReactor(w, nil))
+	c.AddReactor("list", objType, listFn)
+	return w
+}
+
 func cloudPrivateIPConfigObjSetup(c *ocpcloudnetworkclientsetfake.Clientset, objType string, listFn func(core.Action) (bool, runtime.Object, error)) *watch.FakeWatcher {
 	w := watch.NewFake()
 	c.AddWatchReactor(objType, core.DefaultWatchReactor(w, nil))
@@ -300,6 +318,7 @@ var _ = Describe("Watch Factory Operations", func() {
 		endpointSliceWatch                  *watch.FakeWatcher
 		egressFirewallWatch                 *watch.FakeWatcher
 		egressIPWatch                       *watch.FakeWatcher
+		egressIPDestinationWatch            *watch.FakeWatcher
 		cloudPrivateIPConfigWatch           *watch.FakeWatcher
 		egressQoSWatch                      *watch.FakeWatcher
 		egressServiceWatch                  *watch.FakeWatcher
@@ -312,6 +331,7 @@ var _ = Describe("Watch Factory Operations", func() {
 		endpointSlices                      []*discovery.EndpointSlice
 		services                            []*v1.Service
 		egressIPs                           []*egressip.EgressIP
+		egressIPDestinations                []*egressip.EgressIPTraffic
 		cloudPrivateIPConfigs               []*ocpcloudnetworkapi.CloudPrivateIPConfig
 		wf                                  *WatchFactory
 		egressFirewalls                     []*egressfirewall.EgressFirewall
@@ -427,9 +447,18 @@ var _ = Describe("Watch Factory Operations", func() {
 		})
 
 		egressIPs = make([]*egressip.EgressIP, 0)
-		egressIPWatch = egressIPObjSetup(egressIPFakeClient, "egressips", func(core.Action) (bool, runtime.Object, error) {
+		egressIPWatch = egressIPDestinationObjSetup(egressIPFakeClient, "egressips", func(core.Action) (bool, runtime.Object, error) {
 			obj := &egressip.EgressIPList{}
 			for _, p := range egressIPs {
+				obj.Items = append(obj.Items, *p)
+			}
+			return true, obj, nil
+		})
+
+		egressIPDestinations = make([]*egressip.EgressIPTraffic, 0)
+		egressIPDestinationWatch = egressIPObjSetup(egressIPFakeClient, "egressipdestinations", func(core.Action) (bool, runtime.Object, error) {
+			obj := &egressip.EgressIPTrafficList{}
+			for _, p := range egressIPDestinations {
 				obj.Items = append(obj.Items, *p)
 			}
 			return true, obj, nil
@@ -1781,6 +1810,42 @@ var _ = Describe("Watch Factory Operations", func() {
 
 		wf.RemoveEgressIPHandler(h)
 	})
+
+	It("responds to egressIPDestination add/update/delete events", func() {
+		wf, err = NewMasterWatchFactory(ovnClientset)
+		Expect(err).NotTo(HaveOccurred())
+		err = wf.Start()
+		Expect(err).NotTo(HaveOccurred())
+
+		added := newEgressIPDestination("myEgressIPDestination")
+		h, c := addHandler(wf, EgressIPTrafficType, cache.ResourceEventHandlerFuncs{
+			AddFunc: func(obj interface{}) {
+				egressIPDestination := obj.(*egressip.EgressIPTraffic)
+				Expect(reflect.DeepEqual(egressIPDestination, added)).To(BeTrue())
+			},
+			UpdateFunc: func(old, new interface{}) {
+				newEgressIPDestination := new.(*egressip.EgressIPTraffic)
+				Expect(reflect.DeepEqual(newEgressIPDestination, added)).To(BeTrue())
+				Expect(newEgressIPDestination.Spec.DestinationNetworks).To(Equal([]string{"192.168.0.0/16"}))
+			},
+			DeleteFunc: func(obj interface{}) {
+				egressIPDestination := obj.(*egressip.EgressIPTraffic)
+				Expect(reflect.DeepEqual(egressIPDestination, added)).To(BeTrue())
+			},
+		})
+
+		egressIPDestinations = append(egressIPDestinations, added)
+		egressIPDestinationWatch.Add(added)
+		Eventually(c.getAdded, 2).Should(Equal(1))
+		added.Spec.DestinationNetworks = []egressip.CIDR{"192.168.0.0/16"}
+		egressIPDestinationWatch.Modify(added)
+		Eventually(c.getUpdated, 2).Should(Equal(1))
+		egressIPDestinations = egressIPDestinations[:0]
+		egressIPDestinationWatch.Delete(added)
+		Eventually(c.getDeleted, 2).Should(Equal(1))
+		wf.RemoveEgressIPTrafficHandler(h)
+	})
+
 	It("responds to cloudPrivateIPConfig add/update/delete events", func() {
 		wf, err = NewClusterManagerWatchFactory(ovnCMClientset)
 		Expect(err).NotTo(HaveOccurred())

@@ -168,7 +168,7 @@ func (psas *PodSelectorAddressSet) init(bnc *BaseNetworkController) error {
 		psas.cancelableContext = &cancelableContext
 	}
 	if psas.handlerResources == nil {
-		as, err := bnc.addressSetFactory.NewAddressSet(psas.addrSetDbIDs, nil)
+		as, err := bnc.addressSetFactoryIPs.NewAddressSet(psas.addrSetDbIDs, nil)
 		if err != nil {
 			return err
 		}
@@ -304,7 +304,7 @@ type PodSelectorAddrSetHandlerInfo struct {
 	deleted bool
 
 	// resources updated by podHandler
-	addressSet addressset.AddressSet
+	addressSet addressset.AddressSetIPs
 	// namespaced pod handlers, the only type of handler that can be dynamically deleted without deleting the whole
 	// PodSelectorAddressSet. When namespace is deleted, podHandler for that namespace should be deleted too.
 	// Can be used by multiple namespace handlers in parallel for different keys

@@ -1323,7 +1323,7 @@ func (bnc *BaseNetworkController) handlePeerNamespaceSelectorAdd(np *networkPoli
 	for _, obj := range objs {
 		namespace := obj.(*kapi.Namespace)
 		// addNamespaceAddressSet is safe for concurrent use, doesn't require additional synchronization
-		nsUpdated, err := gp.addNamespaceAddressSet(namespace.Name, bnc.addressSetFactory)
+		nsUpdated, err := gp.addNamespaceAddressSet(namespace.Name, bnc.addressSetFactoryIPs)
 		if err != nil {
 			errors = append(errors, err)
 		} else if nsUpdated {

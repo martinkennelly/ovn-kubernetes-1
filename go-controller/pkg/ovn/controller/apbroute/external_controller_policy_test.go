@@ -145,7 +145,7 @@ func initController(k8sObjects, routePolicyObjects []runtime.Object) {
 		iFactory.APBRouteInformer(),
 		iFactory.NodeCoreInformer().Lister(),
 		nbClient,
-		addressset.NewFakeAddressSetFactory(controllerName),
+		addressset.NewFakeAddressSetFactoryForIPs(controllerName),
 		controllerName,
 		"single-zone")
 	Expect(err).NotTo(HaveOccurred())

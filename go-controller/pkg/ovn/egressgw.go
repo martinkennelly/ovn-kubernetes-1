@@ -666,13 +666,13 @@ func buildPodSNAT(extIPs, podIPNets []*net.IPNet) ([]*nbdb.NAT, error) {
 			Mask: util.GetIPFullMask(podIPNet.IP),
 		}
 		if len(extIPs) == 0 {
-			nats = append(nats, libovsdbops.BuildSNAT(nil, fullMaskPodNet, "", nil))
+			nats = append(nats, libovsdbops.BuildSNAT(nil, fullMaskPodNet, "", nil, ""))
 		} else {
 			for _, gwIPNet := range extIPs {
 				if utilnet.IsIPv6CIDR(gwIPNet) != utilnet.IsIPv6CIDR(podIPNet) {
 					continue
 				}
-				nats = append(nats, libovsdbops.BuildSNAT(&gwIPNet.IP, fullMaskPodNet, "", nil))
+				nats = append(nats, libovsdbops.BuildSNAT(&gwIPNet.IP, fullMaskPodNet, "", nil, ""))
 			}
 		}
 	}
@@ -750,7 +750,7 @@ func (oc *DefaultNetworkController) addHybridRoutePolicyForPod(podIP net.IP, nod
 	if config.Gateway.Mode == config.GatewayModeLocal {
 		// Add podIP to the node's address_set.
 		asIndex := apbroutecontroller.GetHybridRouteAddrSetDbIDs(node, oc.controllerName)
-		as, err := oc.addressSetFactory.EnsureAddressSet(asIndex)
+		as, err := oc.addressSetFactoryIPs.EnsureAddressSet(asIndex)
 		if err != nil {
 			return fmt.Errorf("cannot ensure that addressSet for node %s exists %v", node, err)
 		}
@@ -826,7 +826,7 @@ func (oc *DefaultNetworkController) delHybridRoutePolicyForPod(podIP net.IP, nod
 	if config.Gateway.Mode == config.GatewayModeLocal {
 		// Delete podIP from the node's address_set.
 		asIndex := apbroutecontroller.GetHybridRouteAddrSetDbIDs(node, oc.controllerName)
-		as, err := oc.addressSetFactory.EnsureAddressSet(asIndex)
+		as, err := oc.addressSetFactoryIPs.EnsureAddressSet(asIndex)
 		if err != nil {
 			return fmt.Errorf("cannot Ensure that addressSet for node %s exists %v", node, err)
 		}

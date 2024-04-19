@@ -84,7 +84,7 @@ var _ = ginkgo.Describe("OVN EgressQoS Operations", func() {
 					ExternalIDs: map[string]string{"EgressQoS": "staleNS"},
 					UUID:        "staleQoS-UUID",
 				}
-				staleAddrSet, _ := addressset.GetTestDbAddrSets(
+				staleAddrSet, _ := addressset.GetTestDbAddrSetsIPs(
 					getEgressQosAddrSetDbIDs("staleNS", "1000", controllerName),
 					[]net.IP{net.ParseIP("1.2.3.4")})
 
@@ -245,7 +245,7 @@ var _ = ginkgo.Describe("OVN EgressQoS Operations", func() {
 					ExternalIDs: map[string]string{"EgressQoS": "staleNS"},
 					UUID:        "staleQoS-UUID",
 				}
-				staleAddrSet, _ := addressset.GetTestDbAddrSets(
+				staleAddrSet, _ := addressset.GetTestDbAddrSetsIPs(
 					getEgressQosAddrSetDbIDs("staleNS", "1000", controllerName),
 					[]net.IP{net.ParseIP("1.2.3.4")})
 
@@ -779,40 +779,40 @@ var _ = ginkgo.Describe("OVN EgressQoS Operations", func() {
 			qos3AS := getEgressQosAddrSetDbIDs(namespaceT.Name, "998", controllerName)
 
 			ginkgo.By("Creating pod that matches the first rule only should add its ips to the first address set")
-			fakeOVN.asf.EventuallyExpectAddressSetWithIPs(qos2AS, []string{"10.128.1.3"})
-			fakeOVN.asf.ExpectAddressSetWithIPs(qos3AS, []string{}) // podRemoteT is not local to this zone, so we won't handle it
+			fakeOVN.asfIPs.EventuallyExpectAddressSetWithIPs(qos2AS, []string{"10.128.1.3"})
+			fakeOVN.asfIPs.ExpectAddressSetWithIPs(qos3AS, []string{}) // podRemoteT is not local to this zone, so we won't handle it
 
 			ginkgo.By("Updating local pod to match both rules should add its ips to both address sets")
 			podLocalT.Labels = map[string]string{"rule1": "1", "rule2": "2"}
 			podLocalT.ResourceVersion = "100"
 			_, err = fakeOVN.fakeClient.KubeClient.CoreV1().Pods(podLocalT.Namespace).Update(context.TODO(), podLocalT, metav1.UpdateOptions{})
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
-			fakeOVN.asf.EventuallyExpectAddressSetWithIPs(qos2AS, []string{"10.128.1.3"})
-			fakeOVN.asf.EventuallyExpectAddressSetWithIPs(qos3AS, []string{"10.128.1.3"})
+			fakeOVN.asfIPs.EventuallyExpectAddressSetWithIPs(qos2AS, []string{"10.128.1.3"})
+			fakeOVN.asfIPs.EventuallyExpectAddressSetWithIPs(qos3AS, []string{"10.128.1.3"})
 
 			ginkgo.By("Updating local pod to match the second rule only should remove its ips from the first's address set")
 			podLocalT.Labels = map[string]string{"rule2": "2"}
 			podLocalT.ResourceVersion = "200"
 			_, err = fakeOVN.fakeClient.KubeClient.CoreV1().Pods(podLocalT.Namespace).Update(context.TODO(), podLocalT, metav1.UpdateOptions{})
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
-			fakeOVN.asf.EventuallyExpectAddressSetWithIPs(qos2AS, []string{})
-			fakeOVN.asf.EventuallyExpectAddressSetWithIPs(qos3AS, []string{"10.128.1.3"})
+			fakeOVN.asfIPs.EventuallyExpectAddressSetWithIPs(qos2AS, []string{})
+			fakeOVN.asfIPs.EventuallyExpectAddressSetWithIPs(qos3AS, []string{"10.128.1.3"})
 
 			ginkgo.By("Updating remote pod to now become local; we should see it's IP in the address-set")
 			podRemoteT.Spec.NodeName = node1Name // hacking the zone transfer of a pod
 			podRemoteT.ResourceVersion = "200"
 			_, err = fakeOVN.fakeClient.KubeClient.CoreV1().Pods(podRemoteT.Namespace).Update(context.TODO(), podRemoteT, metav1.UpdateOptions{})
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
-			fakeOVN.asf.EventuallyExpectAddressSetWithIPs(qos2AS, []string{})
-			fakeOVN.asf.EventuallyExpectAddressSetWithIPs(qos3AS, []string{"10.128.1.3", "10.128.2.3"})
+			fakeOVN.asfIPs.EventuallyExpectAddressSetWithIPs(qos2AS, []string{})
+			fakeOVN.asfIPs.EventuallyExpectAddressSetWithIPs(qos3AS, []string{"10.128.1.3", "10.128.2.3"})
 
 			ginkgo.By("Deleting the local pods should be remove its ips from the address sets")
 			err = fakeOVN.fakeClient.KubeClient.CoreV1().Pods(podLocalT.Namespace).Delete(context.TODO(), podLocalT.Name, metav1.DeleteOptions{})
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 			err = fakeOVN.fakeClient.KubeClient.CoreV1().Pods(podRemoteT.Namespace).Delete(context.TODO(), podRemoteT.Name, metav1.DeleteOptions{})
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
-			fakeOVN.asf.EventuallyExpectAddressSetWithIPs(qos2AS, []string{})
-			fakeOVN.asf.EventuallyExpectAddressSetWithIPs(qos3AS, []string{})
+			fakeOVN.asfIPs.EventuallyExpectAddressSetWithIPs(qos2AS, []string{})
+			fakeOVN.asfIPs.EventuallyExpectAddressSetWithIPs(qos3AS, []string{})
 
 			return nil
 		}

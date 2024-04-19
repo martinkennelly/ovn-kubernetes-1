@@ -508,7 +508,7 @@ func (r *RetryFramework) WatchResourceFiltered(namespaceForFilteredHandler strin
 						r.processObjectInTerminalState(obj, key, resourceEventAdd)
 						return
 					}
-
+					klog.Infof("MARTIN: add resource retry for key %q", key)
 					retryObj := r.initRetryObjWithAdd(obj, key)
 					// If there is a delete entry with the same key, we got an add event for an object
 					// with the same name as a previous object that failed deletion.

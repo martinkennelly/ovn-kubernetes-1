@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/onsi/ginkgo/v2"
 	"math/rand"
 	"net"
 	"os"
@@ -14,7 +15,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/ginkgo/v2/dsl/table"
 	"github.com/onsi/gomega"
 
@@ -184,10 +184,13 @@ var _ = ginkgo.Describe("e2e egress IP validation", func() {
 		podHTTPPort             string = "8080"
 		egressIPName            string = "egressip"
 		egressIPName2           string = "egressip-2"
+		egressIPTrafficName     string = "egressiptraffic"
+		egressIPTrafficName2    string = "egressiptraffic-2"
 		targetNodeName          string = "egressTargetNode-allowed"
 		deniedTargetNodeName    string = "egressTargetNode-denied"
 		targetSecondaryNodeName string = "egressSecondaryTargetNode-allowed"
 		egressIPYaml            string = "egressip.yaml"
+		egressIPTrafficYaml     string = "egressiptraffic.yaml"
 		egressFirewallYaml      string = "egressfirewall.yaml"
 		waitInterval                   = 3 * time.Second
 		ciNetworkName                  = "kind"
@@ -532,6 +535,7 @@ var _ = ginkgo.Describe("e2e egress IP validation", func() {
 	ginkgo.AfterEach(func() {
 		e2ekubectl.RunKubectlOrDie("default", "delete", "eip", egressIPName, "--ignore-not-found=true")
 		e2ekubectl.RunKubectlOrDie("default", "delete", "eip", egressIPName2, "--ignore-not-found=true")
+		e2ekubectl.RunKubectlOrDie("default", "delete", "egressiptraffic", egressIPTrafficName, "--ignore-not-found=true")
 		e2ekubectl.RunKubectlOrDie("default", "label", "node", egress1Node.name, "k8s.ovn.org/egress-assignable-")
 		e2ekubectl.RunKubectlOrDie("default", "label", "node", egress2Node.name, "k8s.ovn.org/egress-assignable-")
 		deleteClusterExternalContainer(targetNode.name)
@@ -1835,6 +1839,345 @@ spec:
 		if regexp.MustCompile(`cache expires.*mtu.*`).Match([]byte(stdout)) {
 			framework.Failf("unexpected server IP route cache: %s", stdout)
 		}
+	})
+
+	ginkgo.FIt("applies EgressIP for the given destination networks", func() {
+		// TODO: randomize traffic selectors
+		usedEgressNodeAvailabilityHandler = &egressNodeAvailabilityHandlerViaLabel{f}
+
+		ginkgo.By("Setting a node as available for egress")
+		usedEgressNodeAvailabilityHandler.Enable(egress1Node.name)
+
+		targetNode2 := deniedTargetNode
+		podNamespace := f.Namespace
+		podNamespace.Labels = map[string]string{
+			"name": f.Namespace.Name,
+		}
+		updateNamespace(f, podNamespace)
+
+		ginkgo.By("Creating an EgressIP CR with a trafficSelector defined that doesn't select any EgressIPTraffic CRs ")
+		// Assign the egress IP without conflicting with any node IP,
+		// the kind subnet is /16 or /64 so the following should be fine.
+		egressNodeIP := net.ParseIP(egress1Node.nodeIP)
+		egressIP1 := dupIP(egressNodeIP)
+		egressIP1[len(egressIP1)-2]++
+		egressIP2 := dupIP(egressNodeIP)
+		egressIP2[len(egressIP2)-2]++
+		egressIP2[len(egressIP2)-1]++
+		var egressIPConfig = fmt.Sprintf(`apiVersion: k8s.ovn.org/v1
+kind: EgressIP
+metadata:
+  name: ` + egressIPName + `
+spec:
+    egressIPs:
+    - ` + egressIP1.String() + `
+    - ` + egressIP2.String() + `
+    trafficSelector:
+        matchLabels:
+            gateway: north        
+    podSelector:
+        matchLabels:
+            wants: egress
+    namespaceSelector:
+        matchLabels:
+            name: ` + f.Namespace.Name + `
+`)
+		if err := os.WriteFile(egressIPYaml, []byte(egressIPConfig), 0644); err != nil {
+			framework.Failf("Unable to write CRD config to disk: %v", err)
+		}
+		defer func() {
+			if err := os.Remove(egressIPYaml); err != nil {
+				framework.Logf("Unable to remove the CRD config from disk: %v", err)
+			}
+		}()
+		framework.Logf("Create the EgressIP configuration")
+		e2ekubectl.RunKubectlOrDie("default", "create", "-f", egressIPYaml)
+		ginkgo.By("2. Ensure that the status is of length one")
+		statuses := verifyEgressIPStatusLengthEquals(1, nil)
+		if statuses[0].Node != egress1Node.name {
+			framework.Failf("2. Ensure that the status is of length one failed, expected node %q but found %q", egress1Node.name, statuses[0].Node)
+		}
+		assignedEIP := statuses[0].EgressIP
+		ginkgo.By("3. Create two pods matching the EgressIP with one running on an egress node")
+		_, err := createGenericPodWithLabel(f, pod1Name, pod1Node.name, f.Namespace.Name, command, podEgressLabel)
+		gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+		_, err = createGenericPodWithLabel(f, pod2Name, pod2Node.name, f.Namespace.Name, command, podEgressLabel)
+		gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+		err = wait.PollImmediate(retryInterval, retryTimeout, func() (bool, error) {
+			for _, podName := range []string{pod1Name, pod2Name} {
+				kubectlOut := getPodAddress(podName, f.Namespace.Name)
+				srcIP := net.ParseIP(kubectlOut)
+				if srcIP == nil {
+					return false, nil
+				}
+			}
+			return true, nil
+		})
+		framework.ExpectNoError(err, "Step 3. Create two pods matching an EgressIP - running pod(s) failed to get "+
+			"their IP(s), failed, err: %v", err)
+		framework.Logf("Created two pods - pod %s on node %s and pod %s on node %s", pod1Name, pod1Node.name, pod2Name,
+			pod2Node.name)
+
+		ginkgo.By("4. Check connectivity from both pods to an external \"node\" and verify no egress IP")
+		err = wait.PollImmediate(retryInterval, retryTimeout, targetExternalContainerAndTest(targetNode, pod1Name,
+			podNamespace.Name, true, []string{pod1Node.nodeIP}))
+		framework.ExpectNoError(err, "Step 4. Check connectivity from pod (%s/%s) to an external container and "+
+			"verify no egress IP, failed: %v",
+			podNamespace.Name, pod1Name, err)
+		err = wait.PollImmediate(retryInterval, retryTimeout, targetExternalContainerAndTest(targetNode, pod2Name,
+			podNamespace.Name, true, []string{pod2Node.nodeIP}))
+		framework.ExpectNoError(err, "Step 4. Check connectivity from pod (%s/%s) to an external container and "+
+			"verify no egress IP, failed: %v", podNamespace.Name, pod2Name, err)
+
+		ginkgo.By("5. Check connectivity from one pod to the other and verify that the connection is achieved")
+		pod2IP := getPodAddress(pod2Name, f.Namespace.Name)
+		err = wait.PollImmediate(retryInterval, retryTimeout, targetPodAndTest(f.Namespace.Name, pod1Name, pod2Name, pod2IP))
+		framework.ExpectNoError(err, "Step 5. Check connectivity from one pod to the other and verify that the connection "+
+			"is achieved, failed, err: %v", err)
+
+		ginkgo.By("6. Check connectivity from both pods to the api-server (running hostNetwork:true) and verifying that " +
+			"the connection is achieved")
+		err = wait.PollImmediate(retryInterval, retryTimeout, targetDestinationAndTest(podNamespace.Name,
+			fmt.Sprintf("https://%s/version", net.JoinHostPort(getApiAddress(), "443")), []string{pod1Name, pod2Name}))
+		framework.ExpectNoError(err, "Step 6. Check connectivity from both pods to the api-server (running hostNetwork:true) "+
+			"and verifying that the connection is achieved, failed, err: %v", err)
+
+		ginkgo.By("7. Create EgressIPTraffic CR that doesn't match EgressIP traffic selector")
+		fullMask := "/32"
+		if utilnet.IsIPv6String(targetNode.nodeIP) {
+			fullMask = "/128"
+		}
+		targetNodeCIDRFullMask := fmt.Sprintf("%s%s", targetNode.nodeIP, fullMask)
+		egressIPTraffic1Config := fmt.Sprintf(`apiVersion: k8s.ovn.org/v1
+kind: EgressIPTraffic
+metadata:
+  name: ` + egressIPTrafficName + `
+  labels:
+    gateway: "south" 
+spec:
+  destinationNetworks:
+  - ` + targetNodeCIDRFullMask + `    
+`)
+		if err := os.WriteFile(egressIPTrafficYaml, []byte(egressIPTraffic1Config), 0644); err != nil {
+			framework.Failf("Unable to write CRD config to disk: %v", err)
+		}
+		defer func() {
+			if err := os.Remove(egressIPTrafficYaml); err != nil {
+				framework.Logf("Unable to remove the CRD config from disk: %v", err)
+			}
+		}()
+		framework.Logf("Create the EgressIPTraffic configuration")
+		e2ekubectl.RunKubectlOrDie("default", "create", "-f", egressIPTrafficYaml)
+
+		ginkgo.By("8. Check connectivity from both pods to an external \"node\" and verify no egress IP")
+		err = wait.PollImmediate(retryInterval, retryTimeout, targetExternalContainerAndTest(targetNode, pod1Name,
+			podNamespace.Name, true, []string{pod1Node.nodeIP}))
+		framework.ExpectNoError(err, "Step 8. Check connectivity from pod (%s/%s) to an external container and "+
+			"verify no egress IP, failed: %v",
+			podNamespace.Name, pod1Name, err)
+		err = wait.PollImmediate(retryInterval, retryTimeout, targetExternalContainerAndTest(targetNode, pod2Name,
+			podNamespace.Name, true, []string{pod2Node.nodeIP}))
+		framework.ExpectNoError(err, "Step 8. Check connectivity from pod (%s/%s) to an external container and "+
+			"verify no egress IP, failed: %v", podNamespace.Name, pod2Name, err)
+
+		ginkgo.By("9. Check connectivity from one pod to the other and verify that the connection is achieved")
+		err = wait.PollImmediate(retryInterval, retryTimeout, targetPodAndTest(f.Namespace.Name, pod1Name, pod2Name, pod2IP))
+		framework.ExpectNoError(err, "Step 5. Check connectivity from one pod to the other and verify that the connection "+
+			"is achieved, failed, err: %v", err)
+
+		ginkgo.By("10. Check connectivity from both pods to the api-server (running hostNetwork:true) and verifying that " +
+			"the connection is achieved")
+		err = wait.PollImmediate(retryInterval, retryTimeout, targetDestinationAndTest(podNamespace.Name,
+			fmt.Sprintf("https://%s/version", net.JoinHostPort(getApiAddress(), "443")), []string{pod1Name, pod2Name}))
+		framework.ExpectNoError(err, "Step 6. Check connectivity from both pods to the api-server (running hostNetwork:true) "+
+			"and verifying that the connection is achieved, failed, err: %v", err)
+
+		ginkgo.By("11. Update EgressIPTraffic CR labels in-order for it to be selected by EgressIP traffic selectors")
+		egressIPTraffic1Config = fmt.Sprintf(`apiVersion: k8s.ovn.org/v1
+kind: EgressIPTraffic
+metadata:
+  name: ` + egressIPTrafficName + `
+  labels:
+    gateway: north 
+spec:
+  destinationNetworks:
+  - ` + targetNodeCIDRFullMask + `    
+`)
+		if err := os.WriteFile(egressIPTrafficYaml, []byte(egressIPTraffic1Config), 0644); err != nil {
+			framework.Failf("Unable to write CRD config to disk: %v", err)
+		}
+		framework.Logf("Update the EgressIPTraffic configuration")
+		e2ekubectl.RunKubectlOrDie("default", "apply", "-f", egressIPTrafficYaml)
+
+		ginkgo.By("12. Check connectivity from both pods to an external \"node\" and verify egress IP")
+		err = wait.PollImmediate(retryInterval, retryTimeout, targetExternalContainerAndTest(targetNode, pod1Name,
+			podNamespace.Name, true, []string{assignedEIP}))
+		framework.ExpectNoError(err, "Step 12. Check connectivity from pod (%s/%s) to an external container and "+
+			"verify egress IP, failed: %v",
+			podNamespace.Name, pod1Name, err)
+		err = wait.PollImmediate(retryInterval, retryTimeout, targetExternalContainerAndTest(targetNode, pod2Name,
+			podNamespace.Name, true, []string{assignedEIP}))
+		framework.ExpectNoError(err, "Step 12. Check connectivity from pod (%s/%s) to an external container and "+
+			"verify egress IP, failed: %v", podNamespace.Name, pod2Name, err)
+
+		ginkgo.By("13. Check connectivity from both pods to another external \"node\" outside the defined network and verify no egress IP")
+		err = wait.PollImmediate(retryInterval, retryTimeout, targetExternalContainerAndTest(targetNode2, pod1Name,
+			podNamespace.Name, true, []string{pod1Node.nodeIP}))
+		framework.ExpectNoError(err, "Step 13. Check connectivity from pod (%s/%s) to another external container and "+
+			"verify no egress IP, failed: %v", podNamespace.Name, pod1Name, err)
+		err = wait.PollImmediate(retryInterval, retryTimeout, targetExternalContainerAndTest(targetNode2, pod2Name,
+			podNamespace.Name, true, []string{pod2Node.nodeIP}))
+		framework.ExpectNoError(err, "Step 13. Check connectivity from pod (%s/%s) to another external container and "+
+			"verify no egress IP, failed: %v", podNamespace.Name, pod2Name, err)
+
+		ginkgo.By("14. Check connectivity from one pod to the other and verify that the connection is achieved")
+		err = wait.PollImmediate(retryInterval, retryTimeout, targetPodAndTest(f.Namespace.Name, pod1Name, pod2Name, pod2IP))
+		framework.ExpectNoError(err, "Step 14. Check connectivity from one pod to the other and verify that the connection "+
+			"is achieved, failed, err: %v", err)
+
+		ginkgo.By("15. Check connectivity from both pods to the api-server (running hostNetwork:true) and verifying that " +
+			"the connection is achieved")
+		err = wait.PollImmediate(retryInterval, retryTimeout, targetDestinationAndTest(podNamespace.Name,
+			fmt.Sprintf("https://%s/version", net.JoinHostPort(getApiAddress(), "443")), []string{pod1Name, pod2Name}))
+		framework.ExpectNoError(err, "Step 15. Check connectivity from both pods to the api-server (running hostNetwork:true) "+
+			"and verifying that the connection is achieved, failed, err: %v", err)
+
+		ginkgo.By("16. Update EgressIPTraffic CR labels in-order for it to be not selected by EgressIP traffic selectors")
+		egressIPTraffic1Config = fmt.Sprintf(`apiVersion: k8s.ovn.org/v1
+kind: EgressIPTraffic
+metadata:
+  name: ` + egressIPTrafficName + `
+  labels:
+    gateway: south 
+spec:
+  destinationNetworks:
+  - ` + targetNodeCIDRFullMask + `    
+`)
+		if err := os.WriteFile(egressIPTrafficYaml, []byte(egressIPTraffic1Config), 0644); err != nil {
+			framework.Failf("Unable to write CRD config to disk: %v", err)
+		}
+		framework.Logf("Update the EgressIPTraffic configuration")
+		e2ekubectl.RunKubectlOrDie("default", "apply", "-f", egressIPTrafficYaml)
+
+		ginkgo.By("17. Check connectivity from both pods to an external \"node\" and verify no egress IP")
+		err = wait.PollImmediate(retryInterval, retryTimeout, targetExternalContainerAndTest(targetNode, pod1Name,
+			podNamespace.Name, true, []string{pod1Node.nodeIP}))
+		framework.ExpectNoError(err, "Step 17. Check connectivity from pod (%s/%s) to an external container and "+
+			"verify no egress IP, failed: %v",
+			podNamespace.Name, pod1Name, err)
+		err = wait.PollImmediate(retryInterval, retryTimeout, targetExternalContainerAndTest(targetNode, pod2Name,
+			podNamespace.Name, true, []string{pod2Node.nodeIP}))
+		framework.ExpectNoError(err, "Step 17. Check connectivity from pod (%s/%s) to an external container and "+
+			"verify no egress IP, failed: %v", podNamespace.Name, pod2Name, err)
+
+		ginkgo.By("18. Check connectivity from one pod to the other and verify that the connection is achieved")
+		err = wait.PollImmediate(retryInterval, retryTimeout, targetPodAndTest(f.Namespace.Name, pod1Name, pod2Name, pod2IP))
+		framework.ExpectNoError(err, "Step 18. Check connectivity from one pod to the other and verify that the connection "+
+			"is achieved, failed, err: %v", err)
+
+		ginkgo.By("19. Check connectivity from both pods to the api-server (running hostNetwork:true) and verifying that " +
+			"the connection is achieved")
+		err = wait.PollImmediate(retryInterval, retryTimeout, targetDestinationAndTest(podNamespace.Name,
+			fmt.Sprintf("https://%s/version", net.JoinHostPort(getApiAddress(), "443")), []string{pod1Name, pod2Name}))
+		framework.ExpectNoError(err, "Step 18. Check connectivity from both pods to the api-server (running hostNetwork:true) "+
+			"and verifying that the connection is achieved, failed, err: %v", err)
+
+		ginkgo.By("20. Update the EgressIP CR trafficSelector labels to select the EgressIPTraffic CR")
+		egressIPConfig = fmt.Sprintf(`apiVersion: k8s.ovn.org/v1
+kind: EgressIP
+metadata:
+    name: ` + egressIPName + `
+spec:
+    egressIPs:
+    - ` + egressIP1.String() + `
+    - ` + egressIP2.String() + `
+    trafficSelector:
+        matchLabels:
+            gateway: south        
+    podSelector:
+        matchLabels:
+            wants: egress
+    namespaceSelector:
+        matchLabels:
+            name: ` + f.Namespace.Name + `
+`)
+		if err := os.WriteFile(egressIPTrafficYaml, []byte(egressIPConfig), 0644); err != nil {
+			framework.Failf("Unable to write CRD config to disk: %v", err)
+		}
+		framework.Logf("Update the EgressIP configuration")
+		e2ekubectl.RunKubectlOrDie("default", "apply", "-f", egressIPTrafficYaml)
+		ginkgo.By("21. Check connectivity from both pods to an external \"node\" and verify egress IP")
+		err = wait.PollImmediate(retryInterval, retryTimeout, targetExternalContainerAndTest(targetNode, pod1Name,
+			podNamespace.Name, true, []string{assignedEIP}))
+		framework.ExpectNoError(err, "Step 21. Check connectivity from pod (%s/%s) to an external container and "+
+			"verify egress IP, failed: %v",
+			podNamespace.Name, pod1Name, err)
+		err = wait.PollImmediate(retryInterval, retryTimeout, targetExternalContainerAndTest(targetNode, pod2Name,
+			podNamespace.Name, true, []string{assignedEIP}))
+		framework.ExpectNoError(err, "Step 21. Check connectivity from pod (%s/%s) to an external container and "+
+			"verify egress IP, failed: %v", podNamespace.Name, pod2Name, err)
+
+		ginkgo.By("22. Check connectivity from both pods to another external \"node\" outside the defined network and verify no egress IP")
+		err = wait.PollImmediate(retryInterval, retryTimeout, targetExternalContainerAndTest(targetNode2, pod1Name,
+			podNamespace.Name, true, []string{pod1Node.nodeIP}))
+		framework.ExpectNoError(err, "Step 22. Check connectivity from pod (%s/%s) to another external container and "+
+			"verify no egress IP, failed: %v", podNamespace.Name, pod1Name, err)
+		err = wait.PollImmediate(retryInterval, retryTimeout, targetExternalContainerAndTest(targetNode2, pod2Name,
+			podNamespace.Name, true, []string{pod2Node.nodeIP}))
+		framework.ExpectNoError(err, "Step 22. Check connectivity from pod (%s/%s) to another external container and "+
+			"verify no egress IP, failed: %v", podNamespace.Name, pod2Name, err)
+
+		ginkgo.By("23. Check connectivity from one pod to the other and verify that the connection is achieved")
+		err = wait.PollImmediate(retryInterval, retryTimeout, targetPodAndTest(f.Namespace.Name, pod1Name, pod2Name, pod2IP))
+		framework.ExpectNoError(err, "Step 23. Check connectivity from one pod to the other and verify that the connection "+
+			"is achieved, failed, err: %v", err)
+
+		ginkgo.By("24. Check connectivity from both pods to the api-server (running hostNetwork:true) and verifying that " +
+			"the connection is achieved")
+		err = wait.PollImmediate(retryInterval, retryTimeout, targetDestinationAndTest(podNamespace.Name,
+			fmt.Sprintf("https://%s/version", net.JoinHostPort(getApiAddress(), "443")), []string{pod1Name, pod2Name}))
+		framework.ExpectNoError(err, "Step 24. Check connectivity from both pods to the api-server (running hostNetwork:true) "+
+			"and verifying that the connection is achieved, failed, err: %v", err)
+
+		ginkgo.By("25. Create additional EgressIPTraffic CR selected by EgressIP CR with one of the destination networks overlapping a network in another EgressIPTraffic CR")
+		targetNode2CIDRFullMask := fmt.Sprintf("%s%s", targetNode2.nodeIP, fullMask)
+		egressIPTraffic1Config = fmt.Sprintf(`apiVersion: k8s.ovn.org/v1
+kind: EgressIPTraffic
+metadata:
+  name: ` + egressIPTrafficName2 + `
+  labels:
+    gateway: south 
+spec:
+  destinationNetworks:
+  - ` + targetNodeCIDRFullMask + `
+  - ` + targetNode2CIDRFullMask + `
+`)
+		if err := os.WriteFile(egressIPTrafficYaml, []byte(egressIPTraffic1Config), 0644); err != nil {
+			framework.Failf("Unable to write CRD config to disk: %v", err)
+		}
+		framework.Logf("Update the EgressIPTraffic configuration")
+		e2ekubectl.RunKubectlOrDie("default", "apply", "-f", egressIPTrafficYaml)
+
+		ginkgo.By("26. Check connectivity from both pods to an external \"node\" and verify egress IP")
+		err = wait.PollImmediate(retryInterval, retryTimeout, targetExternalContainerAndTest(targetNode, pod1Name,
+			podNamespace.Name, true, []string{assignedEIP}))
+		framework.ExpectNoError(err, "Step 26. Check connectivity from pod (%s/%s) to an external container and "+
+			"verify egress IP, failed: %v",
+			podNamespace.Name, pod1Name, err)
+		err = wait.PollImmediate(retryInterval, retryTimeout, targetExternalContainerAndTest(targetNode, pod2Name,
+			podNamespace.Name, true, []string{assignedEIP}))
+		framework.ExpectNoError(err, "Step 26. Check connectivity from pod (%s/%s) to an external container and "+
+			"verify egress IP, failed: %v", podNamespace.Name, pod2Name, err)
+
+		ginkgo.By("27. Check connectivity from both pods to another external \"node\" and verify egress IP")
+		err = wait.PollImmediate(retryInterval, retryTimeout, targetExternalContainerAndTest(targetNode2, pod1Name,
+			podNamespace.Name, true, []string{assignedEIP}))
+		framework.ExpectNoError(err, "Step 27. Check connectivity from pod (%s/%s) to another external container and "+
+			"verify egress IP, failed: %v", podNamespace.Name, pod1Name, err)
+		err = wait.PollImmediate(retryInterval, retryTimeout, targetExternalContainerAndTest(targetNode2, pod2Name,
+			podNamespace.Name, true, []string{assignedEIP}))
+		framework.ExpectNoError(err, "Step 27. Check connectivity from pod (%s/%s) to another external container and "+
+			"verify egress IP, failed: %v", podNamespace.Name, pod2Name, err)
 	})
 
 	/* This test does the following:

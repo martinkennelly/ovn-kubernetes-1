@@ -71,7 +71,7 @@ func getNsAddrSetHashNames(ns string) (string, string) {
 }
 
 func buildNamespaceAddressSets(namespace string, ips []net.IP) (*nbdb.AddressSet, *nbdb.AddressSet) {
-	return addressset.GetTestDbAddrSets(getNamespaceAddrSetDbIDs(namespace, "default-network-controller"), ips)
+	return addressset.GetTestDbAddrSetsIPs(getNamespaceAddrSetDbIDs(namespace, "default-network-controller"), ips)
 }
 
 var _ = ginkgo.Describe("OVN Namespace Operations", func() {
@@ -105,33 +105,33 @@ var _ = ginkgo.Describe("OVN Namespace Operations", func() {
 			namespace1 := newNamespace(namespaceName)
 			// namespace-owned address set for existing namespace, should stay
 			ns1 := getNamespaceAddrSetDbIDs(namespaceName, DefaultNetworkControllerName)
-			fakeOvn.asf.NewAddressSet(ns1, []net.IP{net.ParseIP("1.1.1.1")})
+			fakeOvn.asfIPs.NewAddressSet(ns1, []net.IP{net.ParseIP("1.1.1.1")})
 			// namespace-owned address set for stale namespace, should be deleted
 			ns2 := getNamespaceAddrSetDbIDs("namespace2", DefaultNetworkControllerName)
-			fakeOvn.asf.NewAddressSet(ns2, []net.IP{net.ParseIP("1.1.1.2")})
+			fakeOvn.asfIPs.NewAddressSet(ns2, []net.IP{net.ParseIP("1.1.1.2")})
 			// netpol peer address set for existing netpol, should stay
 			netpol := getPodSelectorAddrSetDbIDs("pasName", DefaultNetworkControllerName)
-			fakeOvn.asf.NewAddressSet(netpol, []net.IP{net.ParseIP("1.1.1.3")})
+			fakeOvn.asfIPs.NewAddressSet(netpol, []net.IP{net.ParseIP("1.1.1.3")})
 			// egressQoS-owned address set, should stay
 			qos := getEgressQosAddrSetDbIDs("namespace", "0", controllerName)
-			fakeOvn.asf.NewAddressSet(qos, []net.IP{net.ParseIP("1.1.1.4")})
+			fakeOvn.asfIPs.NewAddressSet(qos, []net.IP{net.ParseIP("1.1.1.4")})
 			// hybridNode-owned address set, should stay
 			hybridNode := apbroute.GetHybridRouteAddrSetDbIDs("node", DefaultNetworkControllerName)
-			fakeOvn.asf.NewAddressSet(hybridNode, []net.IP{net.ParseIP("1.1.1.5")})
+			fakeOvn.asfIPs.NewAddressSet(hybridNode, []net.IP{net.ParseIP("1.1.1.5")})
 			// egress firewall-owned address set, should stay
 			ef := getEgressFirewallDNSAddrSetDbIDs("dnsname", controllerName)
-			fakeOvn.asf.NewAddressSet(ef, []net.IP{net.ParseIP("1.1.1.6")})
+			fakeOvn.asfIPs.NewAddressSet(ef, []net.IP{net.ParseIP("1.1.1.6")})
 
 			fakeOvn.startWithDBSetup(libovsdbtest.TestSetup{NBData: []libovsdbtest.TestData{}})
 			err := fakeOvn.controller.syncNamespaces([]interface{}{namespace1})
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
-			fakeOvn.asf.ExpectAddressSetWithIPs(ns1, []string{"1.1.1.1"})
-			fakeOvn.asf.EventuallyExpectNoAddressSet(ns2)
-			fakeOvn.asf.ExpectAddressSetWithIPs(netpol, []string{"1.1.1.3"})
-			fakeOvn.asf.ExpectAddressSetWithIPs(qos, []string{"1.1.1.4"})
-			fakeOvn.asf.ExpectAddressSetWithIPs(hybridNode, []string{"1.1.1.5"})
-			fakeOvn.asf.ExpectAddressSetWithIPs(ef, []string{"1.1.1.6"})
+			fakeOvn.asfIPs.ExpectAddressSetWithIPs(ns1, []string{"1.1.1.1"})
+			fakeOvn.asfIPs.EventuallyExpectNoAddressSet(ns2)
+			fakeOvn.asfIPs.ExpectAddressSetWithIPs(netpol, []string{"1.1.1.3"})
+			fakeOvn.asfIPs.ExpectAddressSetWithIPs(qos, []string{"1.1.1.4"})
+			fakeOvn.asfIPs.ExpectAddressSetWithIPs(hybridNode, []string{"1.1.1.5"})
+			fakeOvn.asfIPs.ExpectAddressSetWithIPs(ef, []string{"1.1.1.6"})
 		})
 
 		ginkgo.It("reconciles an existing namespace with pods", func() {
@@ -176,7 +176,7 @@ var _ = ginkgo.Describe("OVN Namespace Operations", func() {
 			_, err = fakeOvn.fakeClient.KubeClient.CoreV1().Namespaces().Get(context.TODO(), namespaceT.Name, metav1.GetOptions{})
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
-			fakeOvn.asf.EventuallyExpectAddressSetWithIPs(namespaceName, []string{tP.podIP})
+			fakeOvn.asfIPs.EventuallyExpectAddressSetWithIPs(namespaceName, []string{tP.podIP})
 
 			// port group is empty, because it will be filled by pod add logic
 			pg := fakeOvn.controller.buildPortGroup(
@@ -203,7 +203,7 @@ var _ = ginkgo.Describe("OVN Namespace Operations", func() {
 			_, err = fakeOvn.fakeClient.KubeClient.CoreV1().Namespaces().Get(context.TODO(), namespaceName, metav1.GetOptions{})
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
-			fakeOvn.asf.ExpectEmptyAddressSet(namespaceName)
+			fakeOvn.asfIPs.ExpectEmptyAddressSet(namespaceName)
 
 			pg := fakeOvn.controller.buildPortGroup(
 				libovsdbutil.HashedPortGroup(namespaceName),
@@ -345,7 +345,7 @@ var _ = ginkgo.Describe("OVN Namespace Operations", func() {
 			for _, lrpIP := range gwLRPIPs {
 				allowIPs = append(allowIPs, lrpIP.IP.String())
 			}
-			fakeOvn.asf.EventuallyExpectAddressSetWithIPs(hostNetworkNamespace, allowIPs)
+			fakeOvn.asfIPs.EventuallyExpectAddressSetWithIPs(hostNetworkNamespace, allowIPs)
 		})
 
 		ginkgo.It("reconciles an existing namespace port group, without updating it", func() {
@@ -375,7 +375,7 @@ var _ = ginkgo.Describe("OVN Namespace Operations", func() {
 			err := fakeOvn.controller.WatchNamespaces()
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
-			fakeOvn.asf.EventuallyExpectAddressSetWithIPs(namespaceName, []string{})
+			fakeOvn.asfIPs.EventuallyExpectAddressSetWithIPs(namespaceName, []string{})
 			gomega.Eventually(fakeOvn.nbClient).Should(libovsdb.HaveData(initialData))
 		})
 		ginkgo.It("deletes an existing namespace port group when egress firewall and multicast are disabled", func() {
@@ -437,14 +437,14 @@ var _ = ginkgo.Describe("OVN Namespace Operations", func() {
 			})
 			err := fakeOvn.controller.WatchNamespaces()
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
-			fakeOvn.asf.ExpectEmptyAddressSet(namespaceName)
+			fakeOvn.asfIPs.ExpectEmptyAddressSet(namespaceName)
 
 			err = fakeOvn.fakeClient.KubeClient.CoreV1().Namespaces().Delete(context.TODO(), namespaceName, *metav1.NewDeleteOptions(1))
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 			// namespace's address set deletion is delayed by 20 second to let other handlers cleanup
 			gomega.Eventually(func() bool {
-				return fakeOvn.asf.AddressSetExists(namespaceName)
+				return fakeOvn.asfIPs.AddressSetExists(namespaceName)
 			}, 21*time.Second).Should(gomega.BeFalse())
 		})
 	})

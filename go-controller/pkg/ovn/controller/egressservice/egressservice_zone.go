@@ -44,9 +44,9 @@ const (
 	interconnectSuffix = ":ic"
 )
 
-type InitClusterEgressPoliciesFunc func(client libovsdbclient.Client, addressSetFactory addressset.AddressSetFactory,
+type InitClusterEgressPoliciesFunc func(client libovsdbclient.Client, addressSetFactory addressset.AddressSetFactoryIPs,
 	controllerName string) error
-type EnsureNoRerouteNodePoliciesFunc func(client libovsdbclient.Client, addressSetFactory addressset.AddressSetFactory,
+type EnsureNoRerouteNodePoliciesFunc func(client libovsdbclient.Client, addressSetFactory addressset.AddressSetFactoryIPs,
 	controllerName string, nodeLister corelisters.NodeLister) error
 type DeleteLegacyDefaultNoRerouteNodePoliciesFunc func(libovsdbclient.Client, string) error
 type CreateDefaultRouteToExternalFunc func(nbClient libovsdbclient.Client, nodeName string) error
@@ -82,7 +82,7 @@ type Controller struct {
 	nodesQueue  workqueue.RateLimitingInterface
 
 	// An address set factory that creates address sets
-	addressSetFactory addressset.AddressSetFactory
+	addressSetFactory addressset.AddressSetFactoryIPs
 
 	zone string
 }
@@ -115,7 +115,7 @@ func NewController(
 	controllerName string,
 	client kubernetes.Interface,
 	nbClient libovsdbclient.Client,
-	addressSetFactory addressset.AddressSetFactory,
+	addressSetFactory addressset.AddressSetFactoryIPs,
 	initClusterEgressPolicies InitClusterEgressPoliciesFunc,
 	ensureNoRerouteNodePolicies EnsureNoRerouteNodePoliciesFunc,
 	deleteLegacyDefaultNoRerouteNodePolicies DeleteLegacyDefaultNoRerouteNodePoliciesFunc,

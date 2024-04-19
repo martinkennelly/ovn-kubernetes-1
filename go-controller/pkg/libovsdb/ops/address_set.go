@@ -117,8 +117,8 @@ func CreateOrUpdateAddressSets(nbClient libovsdbclient.Client, addrSets ...*nbdb
 	return err
 }
 
-// UpdateAddressSetsIPs updates the IPs on the provided address sets
-func UpdateAddressSetsIPs(nbClient libovsdbclient.Client, addrSets ...*nbdb.AddressSet) error {
+// UpdateAddressSets updates the addresses on the provided address sets
+func UpdateAddressSets(nbClient libovsdbclient.Client, addrSets ...*nbdb.AddressSet) error {
 	opModels := make([]operationModel, 0, len(addrSets))
 	for i := range addrSets {
 		as := addrSets[i]
@@ -136,9 +136,9 @@ func UpdateAddressSetsIPs(nbClient libovsdbclient.Client, addrSets ...*nbdb.Addr
 	return err
 }
 
-// AddIPsToAddressSetOps adds the provided IPs to the provided address set and
+// AddAddressesToAddressSetOps adds the provided addresses to the provided address set and
 // returns the corresponding ops
-func AddIPsToAddressSetOps(nbClient libovsdbclient.Client, ops []libovsdb.Operation, as *nbdb.AddressSet, ips ...string) ([]libovsdb.Operation, error) {
+func AddAddressesToAddressSetOps(nbClient libovsdbclient.Client, ops []libovsdb.Operation, as *nbdb.AddressSet, ips ...string) ([]libovsdb.Operation, error) {
 	originalIPs := as.Addresses
 	as.Addresses = ips
 	opModel := operationModel{
@@ -154,9 +154,9 @@ func AddIPsToAddressSetOps(nbClient libovsdbclient.Client, ops []libovsdb.Operat
 	return ops, err
 }
 
-// DeleteIPsFromAddressSetOps removes the provided IPs from the provided address
+// DeleteAddressesFromAddressSetOps removes the provided IPs from the provided address
 // set and returns the corresponding ops
-func DeleteIPsFromAddressSetOps(nbClient libovsdbclient.Client, ops []libovsdb.Operation, as *nbdb.AddressSet, ips ...string) ([]libovsdb.Operation, error) {
+func DeleteAddressesFromAddressSetOps(nbClient libovsdbclient.Client, ops []libovsdb.Operation, as *nbdb.AddressSet, ips ...string) ([]libovsdb.Operation, error) {
 	originalIPs := as.Addresses
 	as.Addresses = ips
 	opModel := operationModel{

@@ -206,7 +206,7 @@ func getACLsForANPRules(anp *anpapi.AdminNetworkPolicy) []*nbdb.ACL {
 func buildANPAddressSets(anp *anpapi.AdminNetworkPolicy, index int32, ips []net.IP, gressPrefix libovsdbutil.ACLDirection) (*nbdb.AddressSet, *nbdb.AddressSet) {
 	asIndex := anpovn.GetANPPeerAddrSetDbIDs(anp.Name, string(gressPrefix),
 		fmt.Sprintf("%d", index), DefaultNetworkControllerName, false)
-	return addressset.GetTestDbAddrSets(asIndex, ips)
+	return addressset.GetTestDbAddrSetsIPs(asIndex, ips)
 }
 
 var _ = ginkgo.Describe("OVN ANP Operations", func() {
