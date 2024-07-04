@@ -180,7 +180,7 @@ func (oc *DefaultNetworkController) ensureLocalZonePod(oldPod, pod *kapi.Pod, ad
 	if util.IsNetworkSegmentationSupportEnabled() && !util.PodWantsHostNetwork(pod) && !addPort &&
 		pod != nil && oldPod != nil &&
 		pod.Annotations[util.UDNOpenPortsAnnotationName] != oldPod.Annotations[util.UDNOpenPortsAnnotationName] {
-		networkRole, err := oc.GetNetworkRole(pod)
+		networkRole, err := oc.GetNetworkRoleForPod(pod)
 		if err != nil {
 			return err
 		}
