@@ -3,7 +3,9 @@ package e2e
 import (
 	"context"
 	"fmt"
-	"math/rand"
+	"github.com/ovn-org/ovn-kubernetes/test/e2e/deployment"
+	"github.com/ovn-org/ovn-kubernetes/test/e2e/images"
+	"github.com/ovn-org/ovn-kubernetes/test/e2e/provider"
 	"regexp"
 	"time"
 
@@ -20,14 +22,17 @@ import (
 
 var _ = ginkgo.Describe("Pod to external server PMTUD", func() {
 	const (
-		echoServerPodNameTemplate = "echo-server-pod-%d"
-		echoClientPodName         = "echo-client-pod"
-		echoServerPodPortMin      = 9800
-		echoServerPodPortMax      = 9899
-		primaryNetworkName        = "kind"
+		echoServerNameTemplate = "echo-server-%d"
+		echoClientName         = "echo-client"
 	)
+	var providerCtx provider.Context
 
 	f := wrappedTestFramework("pod2external-pmtud")
+
+	ginkgo.BeforeEach(func() {
+		providerCtx = provider.Get().NewTestContext()
+	})
+
 	cleanupFn := func() {}
 
 	ginkgo.AfterEach(func() {
@@ -42,17 +47,16 @@ var _ = ginkgo.Describe("Pod to external server PMTUD", func() {
 	// * Set up a external docker container as a server
 	// * Query from client pod to server pod
 	// Traffic Flow:
-	// Req: podA on nodeA -> nodeA switch -> nodeA cluster-route -> nodeA transit switch -> nodeA join switch -> nodeA GR -> nodeA ext switch -> nodeA br-ex -> underlay
-	// underlay -> server
+	// Req: podA on nodeA -> nodeA switch -> nodeA cluster-router -> nodeA join switch -> nodeA GR -> nodeA ext switch -> nodeA br-ex -> underlay
+	// -> server
 	// Res: server sends large packet -> br-ex on nodeA -> nodeA ext-switch -> rtoe-GR port sends back needs frag thanks to gateway_mtu option
 	// ICMP needs frag goes back to external server
 	// server now fragments packets correctly.
 	// NOTE: on LGW, the pkt exits via mp0 on nodeA and path is different than what is described above
 	// Frag needed is sent by nodeA using ovn-k8s-mp0 interface mtu and not OVN's GR for flows where services are not involved in LGW
 	ginkgo.When("a client ovnk pod targeting an external server is created", func() {
-		var serverPodPort int
-		var serverPodName string
-		var serverNodeInternalIPs []string
+		var serverPort int32
+		var externalContainer provider.ExternalContainer
 
 		var clientPod *v1.Pod
 		var clientPodNodeName string
@@ -72,7 +76,7 @@ var _ = ginkgo.Describe("Pod to external server PMTUD", func() {
 			clientPodNodeName = nodes.Items[1].Name
 
 			ginkgo.By("Creating hostNetwork:false (ovnk) client pod")
-			clientPod = e2epod.NewAgnhostPod(f.Namespace.Name, echoClientPodName, nil, nil, nil)
+			clientPod = e2epod.NewAgnhostPod(f.Namespace.Name, echoClientName, nil, nil, nil)
 			clientPod.Spec.NodeName = clientPodNodeName
 			for k := range clientPod.Spec.Containers {
 				if clientPod.Spec.Containers[k].Name == "agnhost-container" {
@@ -85,30 +89,20 @@ var _ = ginkgo.Describe("Pod to external server PMTUD", func() {
 			e2epod.NewPodClient(f).CreateSync(context.TODO(), clientPod)
 
 			ginkgo.By("Creating the external server")
-			serverPodPort = rand.Intn(echoServerPodPortMax-echoServerPodPortMin) + echoServerPodPortMin
-			serverPodName = fmt.Sprintf(echoServerPodNameTemplate, serverPodPort)
-			framework.Logf("Creating server pod listening on TCP and UDP port %d", serverPodPort)
-			agntHostCmds := []string{"netexec", "--http-port", fmt.Sprintf("%d", serverPodPort), "--udp-port", fmt.Sprintf("%d", serverPodPort)}
-			externalIpv4, externalIpv6 := createClusterExternalContainer(serverPodName, agnhostImage,
-				[]string{"--network", "kind", "-P", "--cap-add", "NET_ADMIN"},
-				agntHostCmds,
-			)
-
+			serverPort = provider.Get().GetExternalContainerPort()
+			serverName := fmt.Sprintf(echoServerNameTemplate, serverPort)
+			framework.Logf("Creating server pod listening on TCP and UDP port %d", serverPort)
+			network, err := provider.Get().PrimaryNetwork()
+			framework.ExpectNoError(err, "failed to get primary network")
+			externalContainer = provider.ExternalContainer{Name: serverName, Image: images.AgnHost(), Network: network,
+				CMD: []string{"netexec", "--http-port", fmt.Sprintf("%d", serverPort), "--udp-port", fmt.Sprintf("%d", serverPort)}}
+			externalContainer, err = providerCtx.CreateExternalContainer(externalContainer)
+			framework.ExpectNoError(err, "failed to create external container (%s)", externalContainer)
 			if isIPv4Supported() {
-				serverNodeInternalIPs = append(serverNodeInternalIPs, externalIpv4)
+				gomega.Expect(externalContainer.GetIPv4()).ToNot(gomega.BeEmpty())
 			}
-
 			if isIPv6Supported() {
-				serverNodeInternalIPs = append(serverNodeInternalIPs, externalIpv6)
-			}
-
-			gomega.Expect(len(serverNodeInternalIPs)).To(gomega.BeNumerically(">", 0))
-		})
-
-		ginkgo.AfterEach(func() {
-			ginkgo.By("Removing external container")
-			if len(serverPodName) > 0 {
-				deleteClusterExternalContainer(serverPodName)
+				gomega.Expect(externalContainer.GetIPv6()).ToNot(gomega.BeEmpty())
 			}
 		})
 
@@ -118,12 +112,15 @@ var _ = ginkgo.Describe("Pod to external server PMTUD", func() {
 		ginkgo.When("tests are run towards the agnhost echo server", func() {
 			ginkgo.It("queries to the hostNetworked server pod on another node shall work for TCP", func() {
 				for _, size := range []string{"small", "large"} {
-					for _, serverNodeIP := range serverNodeInternalIPs {
-						ginkgo.By(fmt.Sprintf("Sending TCP %s payload to node IP %s "+
-							"and expecting to receive the same payload", size, serverNodeIP))
+					for _, externalContainerIP := range []string{externalContainer.GetIPv4(), externalContainer.GetIPv6()} {
+						if externalContainerIP == "" {
+							continue
+						}
+						ginkgo.By(fmt.Sprintf("Sending TCP %s payload to container IP %s "+
+							"and expecting to receive the same payload", size, externalContainerIP))
 						cmd := fmt.Sprintf("curl --max-time 10 -g -q -s http://%s:%d/echo?msg=%s",
-							serverNodeIP,
-							serverPodPort,
+							externalContainerIP,
+							serverPort,
 							echoPayloads[size],
 						)
 						framework.Logf("Testing TCP %s with command %q", size, cmd)
@@ -139,23 +136,26 @@ var _ = ginkgo.Describe("Pod to external server PMTUD", func() {
 				}
 			})
 			ginkgo.It("queries to the hostNetworked server pod on another node shall work for UDP", func() {
-				clientNodeIPv4, clientNodeIPv6 := getContainerAddressesForNetwork(clientPodNodeName, primaryNetworkName) // we always want to fetch from primary network
-				clientnodeIP := clientNodeIPv4
+				network, err := provider.Get().PrimaryNetwork()
+				framework.ExpectNoError(err, "failed to get primary network")
+				primaryInf, err := provider.Get().GetK8NodeNetworkInterface(clientPodNodeName, network)
+				framework.ExpectNoError(err, "failed to get primary network interface info")
+				clientnodeIP := primaryInf.IPv4
 				if IsIPv6Cluster(f.ClientSet) {
-					clientnodeIP = clientNodeIPv6
+					clientnodeIP = primaryInf.IPv6
 				}
 				for _, size := range []string{"small", "large"} {
-					for _, serverNodeIP := range serverNodeInternalIPs {
+					for _, externalContainerIP := range []string{externalContainer.GetIPv4(), externalContainer.GetIPv6()} {
 						if size == "large" {
 							// Flushing the IP route cache will remove any routes in the cache
 							// that are a result of receiving a "need to frag" packet.
 							ginkgo.By("Flushing the ip route cache")
-							stdout, err := runCommand(containerRuntime, "exec", "-i", serverPodName, "ip", "route", "flush", "cache")
+							stdout, err := provider.Get().ExecExternalContainerCommand(externalContainer, []string{"ip", "route", "flush", "cache"})
 							framework.ExpectNoError(err, "Flushing the ip route cache failed")
-							framework.Logf("Flushed cache on %s", serverPodName)
+							framework.Logf("Flushed cache on %s", externalContainer.GetName())
 							// List the current IP route cache for informative purposes.
 							cmd := fmt.Sprintf("ip route get %s", clientnodeIP)
-							stdout, err = runCommand(containerRuntime, "exec", "-i", serverPodName, "ip", "route", "get", clientnodeIP)
+							stdout, err = provider.Get().ExecExternalContainerCommand(externalContainer, []string{"ip", "route", "get", clientnodeIP})
 							framework.ExpectNoError(err, "Listing IP route cache")
 							framework.Logf("%s: %s", cmd, stdout)
 						}
@@ -164,12 +164,12 @@ var _ = ginkgo.Describe("Pod to external server PMTUD", func() {
 						// message, subsequent requests then should succeed.
 						gomega.Eventually(func() error {
 							ginkgo.By(fmt.Sprintf("Sending UDP %s payload to server IP %s "+
-								"and expecting to receive the same payload", size, serverNodeIP))
+								"and expecting to receive the same payload", size, externalContainerIP))
 							// Send payload via UDP.
 							cmd := fmt.Sprintf("echo 'echo %s' | nc -w2 -u %s %d",
 								echoPayloads[size],
-								serverNodeIP,
-								serverPodPort,
+								externalContainerIP,
+								serverPort,
 							)
 							framework.Logf("Testing UDP %s with command %q", size, cmd)
 							stdout, err := e2epodoutput.RunHostCmd(
@@ -186,7 +186,7 @@ var _ = ginkgo.Describe("Pod to external server PMTUD", func() {
 							if size == "large" {
 								ginkgo.By("Making sure that the ip route cache contains an MTU route")
 								// Get IP route cache and make sure that it contains an MTU route on the server side.
-								stdout, err = runCommand(containerRuntime, "exec", "-i", serverPodName, "ip", "route", "get", clientnodeIP)
+								stdout, err = provider.Get().ExecExternalContainerCommand(externalContainer, []string{"ip", "route", "get", clientnodeIP})
 								if err != nil {
 									return fmt.Errorf("could not list IP route cache using cmd: %s, err: %q", cmd, err)
 								}
@@ -202,7 +202,7 @@ var _ = ginkgo.Describe("Pod to external server PMTUD", func() {
 						// flush this on all 3 nodes else we will run into the
 						// bug: https://issues.redhat.com/browse/OCPBUGS-7609.
 						// TODO: Revisit this once https://bugzilla.redhat.com/show_bug.cgi?id=2169839 is fixed.
-						ovnKubeNodePods, err := f.ClientSet.CoreV1().Pods(ovnNs).List(context.TODO(), metav1.ListOptions{
+						ovnKubeNodePods, err := f.ClientSet.CoreV1().Pods(deployment.Get().OVNKubernetesNamespace()).List(context.TODO(), metav1.ListOptions{
 							LabelSelector: "name=ovnkube-node",
 						})
 						if err != nil {
@@ -214,12 +214,12 @@ var _ = ginkgo.Describe("Pod to external server PMTUD", func() {
 							if isInterconnectEnabled() {
 								containerName = "ovnkube-controller"
 							}
-							_, err := e2ekubectl.RunKubectl(ovnNs, "exec", ovnKubeNodePod.Name, "--container", containerName, "--",
+							_, err := e2ekubectl.RunKubectl(deployment.Get().OVNKubernetesNamespace(), "exec", ovnKubeNodePod.Name, "--container", containerName, "--",
 								"ip", "route", "flush", "cache")
 							framework.ExpectNoError(err, "Flushing the ip route cache failed")
 						}
-						framework.Logf("Flushing the ip route cache on %s", serverPodName)
-						_, err = runCommand(containerRuntime, "exec", "-i", serverPodName, "ip", "route", "flush", "cache")
+						framework.Logf("Flushing the ip route cache on %s", externalContainer.GetName())
+						_, err = provider.Get().ExecExternalContainerCommand(externalContainer, []string{"ip", "route", "flush", "cache"})
 						framework.ExpectNoError(err, "Flushing the ip route cache failed")
 					}
 				}
@@ -234,7 +234,6 @@ var _ = ginkgo.Describe("Pod to pod TCP with low MTU", func() {
 		echoClientPodName         = "echo-client-pod"
 		serverPodPort             = 9899
 		mtu                       = 1400
-		primaryNetworkName        = "kind"
 	)
 
 	f := wrappedTestFramework("pod2pod-tcp-low-mtu")
@@ -354,7 +353,6 @@ var _ = ginkgo.Describe("Pod to pod TCP with low MTU", func() {
 					gomega.Expect(stdout).To(gomega.MatchRegexp("mtu 1342"))
 				}
 			})
-
 		})
 	})
 })

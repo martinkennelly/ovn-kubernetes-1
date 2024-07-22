@@ -4,6 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/ovn-org/ovn-kubernetes/test/e2e/deployment"
+	"github.com/ovn-org/ovn-kubernetes/test/e2e/provider"
+	"k8s.io/kubernetes/test/e2e/framework/node"
 	"net"
 	"os"
 	"strings"
@@ -277,8 +280,11 @@ passwd:
 			return conn, nil
 		}
 
-		dialServiceNodePort = func(svc *corev1.Service) ([]*net.TCPConn, error) {
-			worker, err := fr.ClientSet.CoreV1().Nodes().Get(context.TODO(), "ovn-worker", metav1.GetOptions{})
+		dialServiceNodePort = func(client kubernetes.Interface, svc *corev1.Service) ([]*net.TCPConn, error) {
+			worker, err := node.GetRandomReadySchedulableNode(context.TODO(), client)
+			if err != nil {
+				return nil, fmt.Errorf("failed to find ready and schedulable node: %v", err)
+			}
 			if err != nil {
 				return nil, err
 			}
@@ -286,7 +292,7 @@ passwd:
 			nodePort := fmt.Sprintf("%d", svc.Spec.Ports[0].NodePort)
 			port := fmt.Sprintf("%d", svc.Spec.Ports[0].Port)
 
-			d.TCPDumpDaemonSet([]string{"any", "eth0", "breth0"}, fmt.Sprintf("port %s or port %s", port, nodePort))
+			d.TCPDumpDaemonSet([]string{"any", provider.Get().PrimaryInterfaceName(), deployment.Get().ExternalBridgeName()}, fmt.Sprintf("port %s or port %s", port, nodePort))
 			for _, address := range worker.Status.Addresses {
 				if address.Type != corev1.NodeHostName {
 					addr := net.JoinHostPort(address.Address, nodePort)
@@ -708,7 +714,7 @@ passwd:
 			By("Wait some time for service to settle")
 			time.Sleep(2 * time.Second)
 
-			endpoints, err := dialServiceNodePort(svc)
+			endpoints, err := dialServiceNodePort(fr.ClientSet, svc)
 			Expect(err).ToNot(HaveOccurred(), step)
 
 			checkConnectivityAndNetworkPolicies(vm.Name, endpoints, "before live migration")

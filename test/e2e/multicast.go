@@ -137,10 +137,6 @@ var _ = ginkgo.Describe("Multicast", func() {
 var _ = ginkgo.Describe("e2e IGMP validation", func() {
 	const (
 		svcname              string = "igmp-test"
-		ovnNs                string = "ovn-kubernetes"
-		port                 string = "8080"
-		ovnWorkerNode        string = "ovn-worker"
-		ovnWorkerNode2       string = "ovn-worker2"
 		mcastGroup           string = "224.1.1.1"
 		mcastV6Group         string = "ff3e::4321:1234"
 		multicastListenerPod string = "multicast-listener-test-pod"
@@ -173,15 +169,23 @@ var _ = ginkgo.Describe("e2e IGMP validation", func() {
 			multicastSourceCommand = []string{"bash", "-c",
 				fmt.Sprintf("iperf -c %s -u -T 2 -t 3000 -i 5 -V", mcastV6Group)}
 		}
-		ginkgo.By("creating a multicast source pod in node " + ovnWorkerNode)
-		createGenericPod(f, multicastSourcePod, ovnWorkerNode, f.Namespace.Name, multicastSourceCommand)
+		nodes, err := e2enode.GetBoundedReadySchedulableNodes(context.TODO(), f.ClientSet, 2)
+		framework.ExpectNoError(err, "failed to get schedulable nodes")
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		gomega.Expect(len(nodes.Items)).To(gomega.BeNumerically(">", 1))
+		sourceNode := nodes.Items[0]
+		dstNode := nodes.Items[0]
+		ginkgo.By("creating a multicast source pod in node " + sourceNode.Name)
+		_, err = createGenericPod(f, multicastSourcePod, sourceNode.Name, f.Namespace.Name, multicastSourceCommand)
+		framework.ExpectNoError(err, "failed to create multicast source pod %s/%s", f.Namespace.Name, multicastSourcePod)
 
 		// Create a multicast listener pod
-		ginkgo.By("creating a multicast listener pod in node " + ovnWorkerNode2)
-		createGenericPod(f, multicastListenerPod, ovnWorkerNode2, f.Namespace.Name, tcpDumpCommand)
+		ginkgo.By("creating a multicast listener pod in node " + dstNode.Name)
+		_, err = createGenericPod(f, multicastListenerPod, dstNode.Name, f.Namespace.Name, tcpDumpCommand)
+		framework.ExpectNoError(err, "failed to create multicast listener pod %s/%s", f.Namespace.Name, multicastListenerPod)
 
 		// Wait for tcpdump on listener pod to be ready
-		err := wait.PollImmediate(retryInterval, retryTimeout, func() (bool, error) {
+		err = wait.PollImmediate(retryInterval, retryTimeout, func() (bool, error) {
 			kubectlOut, err := e2ekubectl.RunKubectl(f.Namespace.Name, "exec", multicastListenerPod, "--", "/bin/bash", "-c", "ls")
 			if err != nil {
 				time.Sleep(5 * time.Hour)
@@ -198,7 +202,8 @@ var _ = ginkgo.Describe("e2e IGMP validation", func() {
 
 		// The multicast listener pod join multicast group (-B 224.1.1.1), UDP (-u), during (-t 30) seconds, report every (-i 5) seconds
 		ginkgo.By("multicast listener pod join multicast group")
-		e2ekubectl.RunKubectl(f.Namespace.Name, "exec", multicastListenerPod, "--", "/bin/bash", "-c", fmt.Sprintf("iperf -s -B %s -u -t 30 -i 5", mcastGroup))
+		_, err = e2ekubectl.RunKubectl(f.Namespace.Name, "exec", multicastListenerPod, "--", "/bin/bash", "-c", fmt.Sprintf("iperf -s -B %s -u -t 30 -i 5", mcastGroup))
+		framework.ExpectNoError(err, "failed to run multicast listener pod iperf command")
 
 		ginkgo.By(fmt.Sprintf("verifying that the IGMP query has been received"))
 		kubectlOut, err := e2ekubectl.RunKubectl(f.Namespace.Name, "exec", multicastListenerPod, "--", "/bin/bash", "-c", fmt.Sprintf("cat %s | grep igmp", tcpdumpFileName))
@@ -211,5 +216,4 @@ var _ = ginkgo.Describe("e2e IGMP validation", func() {
 			framework.Failf("failed to retrieve multicast IGMP query: igmp messages on the tcpdump logfile not found")
 		}
 	})
-
 })

@@ -4,9 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/ovn-org/ovn-kubernetes/test/e2e/deployment"
+	"github.com/ovn-org/ovn-kubernetes/test/e2e/images"
+	"github.com/ovn-org/ovn-kubernetes/test/e2e/provider"
 	"math/rand"
 	"net"
 	"os"
+	"os/exec"
 	"regexp"
 	"strconv"
 	"strings"
@@ -46,14 +50,9 @@ var (
 var _ = ginkgo.Describe("Services", func() {
 	const (
 		serviceName               = "testservice"
-		ovnWorkerNode             = "ovn-worker"
 		echoServerPodNameTemplate = "echo-server-pod-%d"
 		echoClientPodName         = "echo-client-pod"
-		echoServiceNameTemplate   = "echo-service-%d"
-		echoServerPodPortMin      = 9800
-		echoServerPodPortMax      = 9899
-		echoServicePortMin        = 31200
-		echoServicePortMax        = 31299
+		echoServiceName           = "echo-service"
 	)
 
 	f := wrappedTestFramework("services")
@@ -69,14 +68,12 @@ var _ = ginkgo.Describe("Services", func() {
 		cleanupFn()
 	})
 
-	udpPort := int32(rand.Intn(1000) + 10000)
-	udpPortS := fmt.Sprintf("%d", udpPort)
-
 	ginkgo.It("Creates a host-network service, and ensures that host-network pods can connect to it", func() {
 		namespace := f.Namespace.Name
 		jig := e2eservice.NewTestJig(cs, namespace, serviceName)
 
 		ginkgo.By("Creating a ClusterIP service")
+		udpPort := provider.Get().GetK8HostPort()
 		service, err := jig.CreateUDPService(context.TODO(), func(s *v1.Service) {
 			s.Spec.Ports = []v1.ServicePort{
 				{
@@ -92,7 +89,7 @@ var _ = ginkgo.Describe("Services", func() {
 		ginkgo.By("creating a host-network backend pod")
 
 		serverPod := e2epod.NewAgnhostPod(namespace, "backend", nil, nil, []v1.ContainerPort{{ContainerPort: (udpPort)}, {ContainerPort: (udpPort), Protocol: "UDP"}},
-			"netexec", "--udp-port="+udpPortS)
+			"netexec", fmt.Sprintf("--udp-port=%d", udpPort))
 		serverPod.Labels = jig.Labels
 		serverPod.Spec.HostNetwork = true
 
@@ -101,7 +98,7 @@ var _ = ginkgo.Describe("Services", func() {
 
 		ginkgo.By("Connecting to the service from another host-network pod on node " + nodeName)
 		// find the ovn-kube node pod on this node
-		pods, err := cs.CoreV1().Pods("ovn-kubernetes").List(context.TODO(), metav1.ListOptions{
+		pods, err := cs.CoreV1().Pods(deployment.Get().OVNKubernetesNamespace()).List(context.TODO(), metav1.ListOptions{
 			LabelSelector: "app=ovnkube-node",
 			FieldSelector: "spec.nodeName=" + nodeName,
 		})
@@ -197,13 +194,12 @@ var _ = ginkgo.Describe("Services", func() {
 		ginkgo.When(fmt.Sprintf("a nodePort service targeting a pod with hostNetwork:%t is created", hostNetwork), func() {
 			var serverPod *v1.Pod
 			var serverPodNodeName string
-			var serverPodPort int
+			var serverPodPort int32
 			var serverPodName string
 
-			var svc v1.Service
+			var svc *v1.Service
 			var serviceNode v1.Node
 			var serviceNodeInternalIPs []string
-			var servicePort int
 
 			var clientPod *v1.Pod
 			var clientPodNodeName string
@@ -213,6 +209,8 @@ var _ = ginkgo.Describe("Services", func() {
 				"large": fmt.Sprintf("%01420d", 1),
 			}
 			var echoMtuRegex = regexp.MustCompile(`cache expires.*mtu.*`)
+			tcpPortName := "tcp-port"
+			udpPortName := "udp-port"
 
 			ginkgo.BeforeEach(func() {
 				ginkgo.By("Selecting 3 schedulable nodes")
@@ -249,7 +247,7 @@ var _ = ginkgo.Describe("Services", func() {
 				// Wait for 1 minute and if the pod does not come up, select a different port and try again.
 				// Wait for a max of 5 minutes.
 				gomega.Eventually(func() error {
-					serverPodPort = rand.Intn(echoServerPodPortMax-echoServerPodPortMin) + echoServerPodPortMin
+					serverPodPort = provider.Get().GetK8HostPort()
 					serverPodName = fmt.Sprintf(echoServerPodNameTemplate, serverPodPort)
 					framework.Logf("Creating server pod listening on TCP and UDP port %d", serverPodPort)
 					serverPod = e2epod.NewAgnhostPod(f.Namespace.Name, serverPodName, nil, nil, nil, "netexec",
@@ -278,30 +276,26 @@ var _ = ginkgo.Describe("Services", func() {
 				// If the servicePorts are already in use, creating the service should fail and we should choose another
 				// random port.
 				gomega.Eventually(func() error {
-					servicePort = rand.Intn(echoServicePortMax-echoServicePortMin) + echoServicePortMin
-					framework.Logf("Creating the nodePort service listening on TCP and UDP port %d and targeting pod port %d",
-						servicePort, serverPodPort)
-					svc = v1.Service{
-						ObjectMeta: metav1.ObjectMeta{Name: fmt.Sprintf(echoServiceNameTemplate, servicePort)},
+					framework.Logf("Creating the nodePort service")
+					svc = &v1.Service{
+						ObjectMeta: metav1.ObjectMeta{Name: echoServiceName},
 						Spec: v1.ServiceSpec{
 							Ports: []v1.ServicePort{
 								{
-									Name:     "tcp-port",
-									NodePort: int32(servicePort),
-									Port:     int32(serverPodPort),
+									Name:     tcpPortName,
+									Port:     serverPodPort,
 									Protocol: v1.ProtocolTCP,
 								},
 								{
-									Name:     "udp-port",
-									NodePort: int32(servicePort),
-									Port:     int32(serverPodPort),
+									Name:     udpPortName,
+									Port:     serverPodPort,
 									Protocol: v1.ProtocolUDP,
 								},
 							},
 							Selector: map[string]string{"app": serverPodName},
 							Type:     v1.ServiceTypeNodePort},
 					}
-					_, err := f.ClientSet.CoreV1().Services(f.Namespace.Name).Create(context.TODO(), &svc, metav1.CreateOptions{})
+					svc, err = f.ClientSet.CoreV1().Services(f.Namespace.Name).Create(context.TODO(), svc, metav1.CreateOptions{})
 					return err
 				}, 60*time.Second, 1*time.Second).Should(gomega.Succeed())
 			})
@@ -312,6 +306,7 @@ var _ = ginkgo.Describe("Services", func() {
 			ginkgo.When("tests are run towards the agnhost echo service", func() {
 				ginkgo.It("queries to the nodePort service shall work for TCP", func() {
 					for _, size := range []string{"small", "large"} {
+						tcpPort := svcPortByName(svc, tcpPortName)
 						for _, serviceNodeIP := range serviceNodeInternalIPs {
 							targetIP := serviceNodeIP
 							if IsIPv6Cluster(f.ClientSet) {
@@ -321,7 +316,7 @@ var _ = ginkgo.Describe("Services", func() {
 								"and expecting to receive the same payload", size, serviceNodeIP))
 							cmd := fmt.Sprintf("curl --max-time 10 -g -q -s http://%s:%d/echo?msg=%s",
 								targetIP,
-								servicePort,
+								tcpPort,
 								echoPayloads[size],
 							)
 							framework.Logf("Testing TCP %s with command %q", size, cmd)
@@ -386,7 +381,7 @@ var _ = ginkgo.Describe("Services", func() {
 								framework.ExpectNoError(err, "Listing IP route cache")
 								framework.Logf("%s: %s", cmd, stdout)
 							}
-
+							udpPort := svcPortByName(svc, udpPortName)
 							// We expect the following to fail at least once for large payloads and non-hostNetwork
 							// endpoints: the first request will fail as we have to receive a "need to frag" ICMP
 							// message, subsequent requests then should succeed.
@@ -397,7 +392,7 @@ var _ = ginkgo.Describe("Services", func() {
 								cmd := fmt.Sprintf("echo 'echo %s' | nc -w2 -u %s %d",
 									echoPayloads[size],
 									serviceNodeIP,
-									servicePort,
+									udpPort,
 								)
 								framework.Logf("Testing UDP %s with command %q", size, cmd)
 								stdout, err := e2epodoutput.RunHostCmd(
@@ -452,7 +447,8 @@ var _ = ginkgo.Describe("Services", func() {
 							// flush this on all 3 nodes else we will run into the
 							// bug: https://issues.redhat.com/browse/OCPBUGS-7609.
 							// TODO: Revisit this once https://bugzilla.redhat.com/show_bug.cgi?id=2169839 is fixed.
-							ovnKubeNodePods, err := f.ClientSet.CoreV1().Pods(ovnNs).List(context.TODO(), metav1.ListOptions{
+							ovnKubernetesNamespace := deployment.Get().OVNKubernetesNamespace()
+							ovnKubeNodePods, err := f.ClientSet.CoreV1().Pods(ovnKubernetesNamespace).List(context.TODO(), metav1.ListOptions{
 								LabelSelector: "name=ovnkube-node",
 							})
 							if err != nil {
@@ -464,7 +460,7 @@ var _ = ginkgo.Describe("Services", func() {
 								if isInterconnectEnabled() {
 									containerName = "ovnkube-controller"
 								}
-								_, err := e2ekubectl.RunKubectl(ovnNs, "exec", ovnKubeNodePod.Name, "--container", containerName, "--",
+								_, err := e2ekubectl.RunKubectl(ovnKubernetesNamespace, "exec", ovnKubeNodePod.Name, "--container", containerName, "--",
 									"ip", "route", "flush", "cache")
 								framework.ExpectNoError(err, "Flushing the ip route cache failed")
 							}
@@ -485,18 +481,20 @@ var _ = ginkgo.Describe("Services", func() {
 		)
 		nodes, err := e2enode.GetBoundedReadySchedulableNodes(context.TODO(), cs, e2eservice.MaxNodesForEndpointsTests)
 		framework.ExpectNoError(err)
+		gomega.Expect(nodes.Items).To(gomega.BeNumerically(">", 0))
 		v4NodeAddrs := e2enode.FirstAddressByTypeAndFamily(nodes, v1.NodeInternalIP, v1.IPv4Protocol)
 		v6NodeAddrs := e2enode.FirstAddressByTypeAndFamily(nodes, v1.NodeInternalIP, v1.IPv6Protocol)
 		if v4NodeAddrs == "" && v6NodeAddrs == "" {
 			framework.Failf("unable to detect if cluster supports IPv4 or IPv6")
 		}
+		nodeName := nodes.Items[0].Name
 		getIPRouteGetOutput := func(dst string) string {
-			cmd := []string{containerRuntime, "exec", ovnWorkerNode, "ip"}
+			cmd := []string{"ip"}
 			if utilnet.IsIPv6String(dst) {
 				cmd = append(cmd, "-6")
 			}
 			cmd = append(cmd, "route", "get", dst)
-			output, err := runCommand(cmd...)
+			output, err := provider.Get().ExecK8NodeCommand(nodeName, cmd)
 			framework.ExpectNoError(err, fmt.Sprintf("failed to exec '%v': %v", cmd, err))
 			return output
 		}
@@ -525,9 +523,10 @@ var _ = ginkgo.Describe("Services", func() {
 		jig := e2eservice.NewTestJig(cs, namespace, serviceName)
 		nodes, err := e2enode.GetBoundedReadySchedulableNodes(context.TODO(), cs, e2eservice.MaxNodesForEndpointsTests)
 		framework.ExpectNoError(err)
+		gomega.Expect(nodes.Items).To(gomega.BeNumerically(">", 0))
 		node := nodes.Items[0]
 		nodeName := node.Name
-		pods, err := cs.CoreV1().Pods("ovn-kubernetes").List(context.TODO(), metav1.ListOptions{
+		pods, err := cs.CoreV1().Pods(deployment.Get().OVNKubernetesNamespace()).List(context.TODO(), metav1.ListOptions{
 			LabelSelector: "app=ovnkube-node",
 			FieldSelector: "spec.nodeName=" + nodeName,
 		})
@@ -538,13 +537,14 @@ var _ = ginkgo.Describe("Services", func() {
 		ginkgo.By("Using node" + nodeName + " and pod " + clientPod.Name)
 
 		ginkgo.By("Creating an empty ClusterIP service")
+		udpHostNsPort := provider.Get().GetK8HostPort()
 		service, err := jig.CreateUDPService(context.TODO(), func(s *v1.Service) {
 			s.Spec.Ports = []v1.ServicePort{
 				{
 					Name:       "udp",
 					Protocol:   v1.ProtocolUDP,
 					Port:       80,
-					TargetPort: intstr.FromInt(int(udpPort)),
+					TargetPort: intstr.FromInt32(udpHostNsPort),
 				},
 			}
 
@@ -567,7 +567,7 @@ var _ = ginkgo.Describe("Services", func() {
 		framework.ExpectNoError(err)
 		cleanupFn = func() {
 			// initial pod used for host command may be deleted at this point, refetch
-			pods, err := cs.CoreV1().Pods("ovn-kubernetes").List(context.TODO(), metav1.ListOptions{
+			pods, err := cs.CoreV1().Pods(deployment.Get().OVNKubernetesNamespace()).List(context.TODO(), metav1.ListOptions{
 				LabelSelector: "app=ovnkube-node",
 				FieldSelector: "spec.nodeName=" + nodeName,
 			})
@@ -581,8 +581,9 @@ var _ = ginkgo.Describe("Services", func() {
 		ginkgo.By("Starting a UDP server listening on the additional IP")
 		// now that 2.2.2.2 exists on the node's lo interface, let's start a server listening on it
 		// we use UDP here since agnhost lets us pick the listen address only for UDP
-		serverPod := e2epod.NewAgnhostPod(namespace, "backend", nil, nil, []v1.ContainerPort{{ContainerPort: (udpPort)}, {ContainerPort: (udpPort), Protocol: "UDP"}},
-			"netexec", "--udp-port="+udpPortS, "--udp-listen-addresses="+extraIP)
+		serverPod := e2epod.NewAgnhostPod(namespace, "backend", nil, nil,
+			[]v1.ContainerPort{{ContainerPort: udpHostNsPort}, {ContainerPort: udpHostNsPort, Protocol: "UDP"}},
+			"netexec", fmt.Sprintf("--udp-port=%d", udpHostNsPort), "--udp-listen-addresses="+extraIP)
 		serverPod.Labels = jig.Labels
 		serverPod.Spec.NodeName = nodeName
 		serverPod.Spec.HostNetwork = true
@@ -594,7 +595,7 @@ var _ = ginkgo.Describe("Services", func() {
 		// sanity check that we're actually listening on this IP
 		err = wait.PollImmediate(framework.Poll, 30*time.Second, func() (bool, error) {
 			cmd = fmt.Sprintf(`echo hostname | /usr/bin/socat -t 5 - "udp:%s"`,
-				net.JoinHostPort(extraIP, udpPortS))
+				net.JoinHostPort(extraIP, fmt.Sprintf("%d", udpHostNsPort)))
 			stdout, err := e2epodoutput.RunHostCmdWithRetries(clientPod.Namespace, clientPod.Name, cmd, framework.Poll, 30*time.Second)
 			if err != nil {
 				return false, err
@@ -617,7 +618,7 @@ var _ = ginkgo.Describe("Services", func() {
 						Ports: []v1.EndpointPort{
 							{
 								Name:     "udp",
-								Port:     udpPort,
+								Port:     udpHostNsPort,
 								Protocol: "UDP",
 							},
 						},
@@ -642,7 +643,8 @@ var _ = ginkgo.Describe("Services", func() {
 
 		ginkgo.By("Confirming that the service is accessible from the node's pod network")
 		// Now, spin up a pod-network pod on the same node, and ensure we can talk to the "local address" service
-		clientServerPod := e2epod.NewAgnhostPod(namespace, "client", nil, nil, []v1.ContainerPort{{ContainerPort: (udpPort)}, {ContainerPort: (udpPort), Protocol: "UDP"}},
+		clientServerPod := e2epod.NewAgnhostPod(namespace, "client", nil, nil,
+			[]v1.ContainerPort{{ContainerPort: udpHostNsPort}, {ContainerPort: udpHostNsPort, Protocol: "UDP"}},
 			"netexec")
 		clientServerPod.Spec.NodeName = nodeName
 		e2epod.NewPodClient(f).CreateSync(context.TODO(), clientServerPod)
@@ -667,10 +669,6 @@ var _ = ginkgo.Describe("Services", func() {
 	})
 
 	ginkgo.Context("of type NodePort", func() {
-		var nodes *v1.NodeList
-		var err error
-		nodeIPs := make(map[string]map[int]string)
-
 		const (
 			endpointHTTPPort    = 80
 			endpointUDPPort     = 90
@@ -679,14 +677,23 @@ var _ = ginkgo.Describe("Services", func() {
 			clientContainerName = "npclient"
 		)
 
+		var (
+			nodes       *v1.NodeList
+			err         error
+			providerCtx provider.Context
+			nodeIPs     = make(map[string]map[int]string)
+		)
+
+		ginkgo.BeforeEach(func() {
+			providerCtx = provider.Get().NewTestContext()
+		})
+
 		ginkgo.AfterEach(func() {
-			ginkgo.By("Cleaning up external container")
-			deleteClusterExternalContainer(clientContainerName)
 			ginkgo.By("Deleting additional IP addresses from nodes")
 			for nodeName, ipFamilies := range nodeIPs {
 				for _, ip := range ipFamilies {
-					_, err := runCommand(containerRuntime, "exec", nodeName, "ip", "addr", "delete",
-						fmt.Sprintf("%s/32", ip), "dev", "breth0")
+					_, err := provider.Get().ExecK8NodeCommand(nodeName, []string{"ip", "addr", "delete",
+						fmt.Sprintf("%s/32", ip), "dev", deployment.Get().ExternalBridgeName()})
 					if err != nil && !strings.Contains(err.Error(),
 						"RTNETLINK answers: Cannot assign requested address") {
 						framework.Failf("failed to remove ip address %s from node %s, err: %q", ip, nodeName, err)
@@ -727,12 +734,15 @@ var _ = ginkgo.Describe("Services", func() {
 			}
 
 			ginkgo.By("Creating an external container to send the traffic from")
-			createClusterExternalContainer(clientContainerName, agnhostImage,
-				[]string{"--network", "kind", "-P"},
-				[]string{"netexec", "--http-port=80"})
+			network, err := provider.Get().PrimaryNetwork()
+			framework.ExpectNoError(err, "failed to get primary network")
+			externalContainerPort := provider.Get().GetExternalContainerPort()
+			externalContainer := provider.ExternalContainer{Name: clientContainerName, Image: images.AgnHost(), Network: network,
+				CMD: []string{"netexec", fmt.Sprintf("--http-port=%d", externalContainerPort)}}
 
 			// If `kindexgw` exists, connect client container to it
-			runCommand(containerRuntime, "network", "connect", "kindexgw", clientContainerName)
+			exGWNetwork := provider.Network{Name: "kindexgw"}
+			_, _ = providerCtx.AttachNetwork(exGWNetwork, externalContainer.Name)
 
 			ginkgo.By("Selecting additional IP addresses for each node")
 			// add new secondary IP from node subnet to all nodes, if the cluster is v6 add an ipv6 address
@@ -771,7 +781,7 @@ var _ = ginkgo.Describe("Services", func() {
 			for nodeName, ipFamilies := range nodeIPs {
 				for _, ip := range ipFamilies {
 					// manually add the a secondary IP to each node
-					_, err = runCommand(containerRuntime, "exec", nodeName, "ip", "addr", "add", ip, "dev", "breth0")
+					_, err = provider.Get().ExecK8NodeCommand(nodeName, []string{"ip", "addr", "add", ip, "dev", deployment.Get().ExternalBridgeName()})
 					if err != nil {
 						framework.Failf("failed to add new IP address %s to node %s: %v", ip, nodeName, err)
 					}
@@ -827,7 +837,7 @@ var _ = ginkgo.Describe("Services", func() {
 
 						ginkgo.By("Hitting service " + serviceSpec.Name + " on " + address + " via " + protocol)
 						gomega.Eventually(func() bool {
-							epHostname := pokeEndpoint("", clientContainerName, protocol, address, toCurlPort,
+							epHostname := pokeEndpointViaExternalContainer(externalContainer, protocol, address, toCurlPort,
 								"hostname")
 							// Expect to receive a valid hostname
 							return nodesHostnames.Has(epHostname)
@@ -852,8 +862,10 @@ var _ = ginkgo.Describe("Services", func() {
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 			gomega.Expect(len(nodes.Items)).To(gomega.BeNumerically(">", 0))
 			nodeName := nodes.Items[0].Name
-			serverNodeIPv4, serverNodeIPv6 := getContainerAddressesForNetwork(nodeName, primaryNetworkName)
-
+			primaryNetwork, err := provider.Get().PrimaryNetwork()
+			framework.ExpectNoError(err, "failed to get primary network")
+			primaryInf, err := provider.Get().GetK8NodeNetworkInterface(nodeName, primaryNetwork)
+			framework.ExpectNoError(err, "failed to get primary interface for node %s", nodeName)
 			ginkgo.By("Creating the backend pod")
 			args := []string{
 				"netexec",
@@ -864,7 +876,7 @@ var _ = ginkgo.Describe("Services", func() {
 
 			serverPodName := nodeName + "-ep"
 			var serverContainerName string
-			_, err := createPod(f, serverPodName, nodeName, f.Namespace.Name, []string{}, endpointsSelector,
+			_, err = createPod(f, serverPodName, nodeName, f.Namespace.Name, []string{}, endpointsSelector,
 				func(p *v1.Pod) {
 					p.Spec.Containers[0].Args = args
 					serverContainerName = p.Spec.Containers[0].Name
@@ -900,21 +912,22 @@ var _ = ginkgo.Describe("Services", func() {
 			framework.ExpectNoError(err)
 
 			ginkgo.By("Creating an external client")
-			clientIPv4, clientIPv6 := createClusterExternalContainer(
-				clientContainerName,
-				agnhostImage,
-				[]string{"--privileged", "--network", "kind"},
-				[]string{"pause"},
-			)
+			network, err := provider.Get().PrimaryNetwork()
+			framework.ExpectNoError(err, "failed to get primary network")
+			externalContainer := provider.ExternalContainer{Name: clientContainerName, Image: images.AgnHost(), Network: network,
+				CMD: []string{"pause"}}
+			externalContainer, err = providerCtx.CreateExternalContainer(externalContainer)
+			framework.ExpectNoError(err, "failed to create external container", externalContainer)
 
-			clientIP := clientIPv4
-			serverNodeIP := serverNodeIPv4
-			ipContainerCmd := "ip"
+			clientIP := externalContainer.GetIPv4()
+			serverNodeIP := primaryInf.IPv4
+			ipContainerCmdPrefix := []string{"ip"}
 			if IsIPv6Cluster(f.ClientSet) {
-				clientIP = clientIPv6
-				serverNodeIP = serverNodeIPv6
-				ipContainerCmd = "ip -6"
+				clientIP = externalContainer.GetIPv6()
+				serverNodeIP = primaryInf.IPv6
+				ipContainerCmdPrefix = append(ipContainerCmdPrefix, "-6")
 			}
+			gomega.Expect(clientIP).ShouldNot(gomega.BeEmpty())
 
 			const pmtu = "1300"
 			payloads := map[string]string{
@@ -931,19 +944,14 @@ var _ = ginkgo.Describe("Services", func() {
 			// test setup required to achieve fragmentation without emulating
 			// PMTUD is more complex so we stick to UDP.
 			ginkgo.By("Lowering PMTU towards the server")
-			ipContainerCmd += " route add " + serverNodeIP + " dev eth0 src " + clientIP + " mtu " + pmtu
-			cmd := []string{
-				containerRuntime,
-				"exec",
-				clientContainerName,
-				"/bin/sh",
-				"-c",
-				ipContainerCmd,
-			}
-			framework.Logf("Running %v", cmd)
-			_, err = runCommand(cmd...)
+			ipContainerCmd := append(ipContainerCmdPrefix, "route", "add", serverNodeIP, "dev", provider.Get().PrimaryInterfaceName(), "src", clientIP, "mtu", pmtu)
+			_, err = provider.Get().ExecExternalContainerCommand(externalContainer, ipContainerCmd)
 			framework.ExpectNoError(err, "lowering MTU in the external kind container failed: %v", err)
-
+			providerCtx.AddCleanUpFn(func() error {
+				ipContainerCmd := append(ipContainerCmdPrefix, "route", "del", serverNodeIP, "dev", provider.Get().PrimaryInterfaceName(), "src", clientIP, "mtu", pmtu)
+				_, err = provider.Get().ExecExternalContainerCommand(externalContainer, ipContainerCmd)
+				return err
+			})
 			var udpPort int32
 			for _, port := range service.Spec.Ports {
 				if port.Protocol == v1.ProtocolUDP {
@@ -969,16 +977,8 @@ var _ = ginkgo.Describe("Services", func() {
 				if sourcePort != "" {
 					containerCmd = fmt.Sprintf("echo 'echo %s' | nc -w2 -u -p %s %s %d", payload, sourcePort, serverNodeIP, udpPort)
 				}
-				cmd = []string{
-					containerRuntime,
-					"exec",
-					clientContainerName,
-					"/bin/sh",
-					"-c",
-					containerCmd,
-				}
-				framework.Logf("Running %v", cmd)
-				stdout, err := runCommand(cmd...)
+				framework.Logf("Running %v", containerCmd)
+				stdout, err := provider.Get().ExecExternalContainerCommand(externalContainer, []string{"/bin/sh", "-c", containerCmd})
 				framework.ExpectNoError(err, "sending echo request failed: %v", err)
 
 				ginkgo.By("Checking that the service received the request and replied")
@@ -1079,7 +1079,7 @@ var _ = ginkgo.Describe("Service Hairpin SNAT", func() {
 			isIpv6 = true
 		}
 
-		clientIP := pokeEndpoint(namespaceName, backendName, "http", svcIP, serviceHTTPPort, "clientip")
+		clientIP := pokeEndpointViaPod(namespaceName, backendName, "http", svcIP, serviceHTTPPort, "clientip")
 		clientIP, _, err = net.SplitHostPort(clientIP)
 		framework.ExpectNoError(err, "failed to parse client ip:port")
 
@@ -1094,15 +1094,16 @@ var _ = ginkgo.Describe("Service Hairpin SNAT", func() {
 
 		ginkgo.By("creating an host-network backend pod on " + backendNodeName)
 		// create hostNeworkedPods
+		hostNetPort := provider.Get().GetK8HostPort()
 		_, err := createPod(f, backendName, backendNodeName, namespaceName, []string{}, hairpinPodSel, func(p *v1.Pod) {
-			p.Spec.Containers[0].Command = []string{"/agnhost", "netexec", fmt.Sprintf("--http-port=%s", endpointHTTPPort)}
+			p.Spec.Containers[0].Command = []string{"/agnhost", "netexec", fmt.Sprintf("--http-port=%d", hostNetPort)}
 			p.Spec.HostNetwork = true
 		})
 		framework.ExpectNoError(err, fmt.Sprintf("unable to create backend pod: %s, err: %v", backendName, err))
 
 		ginkgo.By("creating a TCP service service-for-pods with type=NodePort in namespace " + namespaceName)
 
-		svcIP, err = createServiceForPodsWithLabel(f, namespaceName, serviceHTTPPort, endpointHTTPPort, "NodePort", hairpinPodSel)
+		svcIP, err = createServiceForPodsWithLabel(f, namespaceName, serviceHTTPPort, fmt.Sprintf("%d", hostNetPort), "NodePort", hairpinPodSel)
 		framework.ExpectNoError(err, fmt.Sprintf("unable to create service: service-for-pods, err: %v", err))
 
 		err = framework.WaitForServiceEndpointsNum(context.TODO(), f.ClientSet, namespaceName, "service-for-pods", 1, time.Second, wait.ForeverTestTimeout)
@@ -1113,7 +1114,7 @@ var _ = ginkgo.Describe("Service Hairpin SNAT", func() {
 
 		ginkgo.By("by sending a TCP packet to service service-for-pods with type=NodePort(" + nodeIP + ":" + fmt.Sprint(svc.Spec.Ports[0].NodePort) + ") in namespace " + namespaceName + " from node " + backendNodeName)
 
-		clientIP := pokeEndpoint("", backendNodeName, "http", nodeIP, svc.Spec.Ports[0].NodePort, "clientip")
+		clientIP := pokeEndpointViaNode(backendNodeName, "http", nodeIP, svc.Spec.Ports[0].NodePort, "clientip")
 		clientIP, _, err = net.SplitHostPort(clientIP)
 		framework.ExpectNoError(err, "failed to parse client ip:port")
 
@@ -1253,10 +1254,8 @@ spec:
 				framework.Logf("Unable to remove the CRD config from disk: %v", err)
 			}
 			framework.Logf("Reset MTU on intermediary router to allow large packets")
-			cmd := []string{containerRuntime, "exec", routerContainer}
-			mtuCommand := strings.Split("ip link set mtu 1500 dev eth1", " ")
-			cmd = append(cmd, mtuCommand...)
-			_, err := runCommand(cmd...)
+			externalContainer := provider.ExternalContainer{Name: routerContainer}
+			_, err := provider.Get().ExecExternalContainerCommand(externalContainer, []string{"ip", "link", "set", "mtu", "1500", "dev", "eth1"})
 			framework.ExpectNoError(err, "failed to reset MTU on intermediary router")
 			framework.Logf("Delete the custom BGP Advertisement configuration")
 			e2ekubectl.RunKubectlOrDie("metallb-system", "delete", "bgpadvertisement", "example", "--ignore-not-found=true")
@@ -1362,13 +1361,13 @@ metadata:
 		svcLoadBalancerIP, err := getServiceLoadBalancerIP(f.ClientSet, namespaceName, svcName)
 		framework.ExpectNoError(err, fmt.Sprintf("failed to get service lb ip: %s, err: %v", svcName, err))
 
-		numberOfETPRules := pokeIPTableRules(backendNodeName, "OVN-KUBE-EXTERNALIP")
+		numberOfETPRules := pokeNodeIPTableRules(backendNodeName, "OVN-KUBE-EXTERNALIP")
 		framework.ExpectEqual(numberOfETPRules, 5)
 
 		// curl the LB service from the client container to trigger BGP route advertisement
 		ginkgo.By("by sending a TCP packet to service " + svcName + " with type=LoadBalancer in namespace " + namespaceName + " with backend pod " + backendName)
-
-		_, err = curlInContainer(clientContainer, svcLoadBalancerIP, endpointHTTPPort, "big.iso -o big.iso", 120)
+		externalContainer := provider.ExternalContainer{Name: routerContainer}
+		_, err = curlInExternalContainer(externalContainer, svcLoadBalancerIP, endpointHTTPPort, "big.iso -o big.iso", 120)
 		framework.ExpectNoError(err, "failed to curl load balancer service")
 
 		ginkgo.By("all 3 nodeIP routes are advertised correctly by metalb BGP routes")
@@ -1377,7 +1376,8 @@ metadata:
 		//	nexthop via 172.19.0.3 dev eth0 weight 1
 		//	nexthop via 172.19.0.4 dev eth0 weight 1
 		//	nexthop via 172.19.0.2 dev eth0 weight 1
-		cmd := []string{containerRuntime, "exec", routerContainer}
+
+		cmd := []string{}
 		ipVer := ""
 		if utilnet.IsIPv6String(svcLoadBalancerIP) {
 			ipVer = " -6"
@@ -1390,13 +1390,13 @@ metadata:
 		nonBackendNodeIP, err := getNodeIP(f.ClientSet, backendNodeName)
 		framework.ExpectNoError(err, fmt.Sprintf("failed to get node's %s node ip address", backendNodeName))
 		gomega.Eventually(func() bool {
-			routes, err := runCommand(cmd...)
+			routes, err := provider.Get().ExecExternalContainerCommand(externalContainer, cmd)
 			framework.ExpectNoError(err, "failed to get BGP routes from intermediary router")
 			framework.Logf("Routes in FRR %s", routes)
 			return strings.Contains(routes, backendNodeIP)
 		}, 30*time.Second).Should(gomega.BeTrue())
 		gomega.Eventually(func() bool {
-			routes, err := runCommand(cmd...)
+			routes, err := provider.Get().ExecExternalContainerCommand(externalContainer, cmd)
 			framework.ExpectNoError(err, "failed to get BGP routes from intermediary router")
 			framework.Logf("Routes in FRR %s", routes)
 			return strings.Contains(routes, nonBackendNodeIP)
@@ -1435,11 +1435,11 @@ spec:
 			nodeIP, err := getNodeIP(f.ClientSet, node)
 			framework.ExpectNoError(err, fmt.Sprintf("failed to get nodes's %s node ip address", node))
 			framework.Logf("NodeIP of node %s is %s", node, nodeIP)
-			cmd := []string{containerRuntime, "exec", routerContainer}
-
+			externalContainer := provider.ExternalContainer{Name: routerContainer}
+			cmd := []string{}
 			cmd = append(cmd, bgpRouteCommand...)
 			gomega.Eventually(func() bool {
-				routes, err := runCommand(cmd...)
+				routes, err := provider.Get().ExecExternalContainerCommand(externalContainer, cmd)
 				framework.ExpectNoError(err, "failed to get BGP routes from intermediary router")
 				framework.Logf("Routes in FRR %s", routes)
 				routeCount := 0
@@ -1459,29 +1459,28 @@ spec:
 
 			ginkgo.By("by sending a TCP packet to service " + svcName + " with type=LoadBalancer in namespace " + namespaceName + " with backend pod " + backendName + " via node " + node)
 
-			_, err = curlInContainer(clientContainer, svcLoadBalancerIP, endpointHTTPPort, "big.iso -o big.iso", 120)
+			_, err = curlInExternalContainer(externalContainer, svcLoadBalancerIP, endpointHTTPPort, "big.iso -o big.iso", 120)
 			framework.ExpectNoError(err, "failed to curl load balancer service")
 
 			ginkgo.By("change MTU on intermediary router to force icmp related packets")
-			cmd = []string{containerRuntime, "exec", routerContainer}
+			cmd = []string{}
 			mtuCommand := strings.Split("ip link set mtu 1280 dev eth1", " ")
-
 			cmd = append(cmd, mtuCommand...)
-			_, err = runCommand(cmd...)
+			_, err = provider.Get().ExecExternalContainerCommand(externalContainer, cmd)
 			framework.ExpectNoError(err, "failed to change MTU on intermediary router")
 
 			time.Sleep(time.Second * 5) // buffer to ensure MTU change took effect
 
 			ginkgo.By("by sending a TCP packet to service " + svcName + " with type=LoadBalancer in namespace " + namespaceName + " with backend pod " + backendName + " via node " + node)
 
-			_, err = curlInContainer(clientContainer, svcLoadBalancerIP, endpointHTTPPort, "big.iso -o big.iso", 120)
+			_, err = curlInExternalContainer(externalContainer, svcLoadBalancerIP, endpointHTTPPort, "big.iso -o big.iso", 120)
 			framework.ExpectNoError(err, "failed to curl load balancer service")
 
 			ginkgo.By("reset MTU on intermediary router to allow large packets")
-			cmd = []string{containerRuntime, "exec", routerContainer}
+			cmd = []string{}
 			mtuCommand = strings.Split("ip link set mtu 1500 dev eth1", " ")
 			cmd = append(cmd, mtuCommand...)
-			_, err = runCommand(cmd...)
+			_, err = provider.Get().ExecExternalContainerCommand(externalContainer, cmd)
 			framework.ExpectNoError(err, "failed to reset MTU on intermediary router")
 		}
 	})
@@ -1498,7 +1497,7 @@ spec:
 
 		checkNumberOfETPRules := func(value int, pattern string) wait.ConditionFunc {
 			return func() (bool, error) {
-				numberOfETPRules := pokeIPTableRules(backendNodeName, pattern)
+				numberOfETPRules := pokeNodeIPTableRules(backendNodeName, pattern)
 				return (numberOfETPRules == value), nil
 			}
 		}
@@ -1510,8 +1509,8 @@ spec:
 		framework.ExpectNoError(err, "Couldn't fetch the correct number of iptable rules, err: %v", err)
 
 		ginkgo.By("by sending a TCP packet to service " + svcName + " with type=LoadBalancer in namespace " + namespaceName + " with backend pod " + backendName)
-
-		_, err = curlInContainer(clientContainer, svcLoadBalancerIP, endpointHTTPPort, "big.iso -o big.iso", 120)
+		externalContainer := provider.ExternalContainer{Name: clientContainer}
+		_, err = curlInExternalContainer(externalContainer, svcLoadBalancerIP, endpointHTTPPort, "big.iso -o big.iso", 120)
 		framework.ExpectNoError(err, "failed to curl load balancer service")
 
 		ginkgo.By("patching service " + svcName + " to allocateLoadBalancerNodePorts=false and externalTrafficPolicy=local")
@@ -1537,7 +1536,7 @@ spec:
 
 		ginkgo.By("by sending a TCP packet to service " + svcName + " with type=LoadBalancer in namespace " + namespaceName + " with backend pod " + backendName)
 
-		_, err = curlInContainer(clientContainer, svcLoadBalancerIP, endpointHTTPPort, "big.iso -o big.iso", 120)
+		_, err = curlInExternalContainer(externalContainer, svcLoadBalancerIP, endpointHTTPPort, "big.iso -o big.iso", 120)
 		framework.ExpectNoError(err, "failed to curl load balancer service")
 
 		pktSize := 60
@@ -1563,7 +1562,7 @@ spec:
 
 		ginkgo.By("by sending a TCP packet to service " + svcName + " with type=LoadBalancer in namespace " + namespaceName + " with backend pod " + backendName)
 
-		_, err = curlInContainer(clientContainer, svcLoadBalancerIP, endpointHTTPPort, "big.iso -o big.iso", 120)
+		_, err = curlInExternalContainer(externalContainer, svcLoadBalancerIP, endpointHTTPPort, "big.iso -o big.iso", 120)
 		framework.ExpectNoError(err, "failed to curl load balancer service")
 
 		err = wait.PollImmediate(retryInterval, retryTimeout, checkNumberOfETPRules(1, fmt.Sprintf("[1:%d] -A OVN-KUBE-ETP", pktSize)))
@@ -1595,8 +1594,8 @@ spec:
 		nodeIP, err := getNodeIP(f.ClientSet, backendNodeName)
 		framework.ExpectNoError(err, fmt.Sprintf("failed to get nodes's %s node ip address", backendNodeName))
 		framework.Logf("NodeIP of node %s is %s", backendNodeName, nodeIP)
-		cmd := []string{containerRuntime, "exec", routerContainer}
-
+		externalContainer := provider.ExternalContainer{Name: routerContainer}
+		cmd := []string{}
 		ipVer := ""
 		if utilnet.IsIPv6String(svcLoadBalancerIP) {
 			ipVer = " -6"
@@ -1605,7 +1604,7 @@ spec:
 		cmd = append(cmd, bgpRouteCommand...)
 
 		gomega.Eventually(func() bool {
-			routes, err := runCommand(cmd...)
+			routes, err := provider.Get().ExecExternalContainerCommand(externalContainer, cmd)
 			framework.ExpectNoError(err, "failed to get BGP routes from intermediary router")
 			framework.Logf("Routes in FRR %s", routes)
 			routeCount := 0
@@ -1628,9 +1627,9 @@ spec:
 			svcLoadBalancerIP,
 			endpointUDPPort,
 		)
-		cmd = []string{containerRuntime, "exec", clientContainer, "bash", "-x", "-c", netcatCmd}
+		cmd = []string{"bash", "-x", "-c", netcatCmd}
 		framework.Logf("netcat command %s", cmd)
-		output, err = runCommand(cmd...)
+		output, err = provider.Get().ExecExternalContainerCommand(externalContainer, cmd)
 		framework.ExpectNoError(err, "failed to connect to load balancer service")
 		framework.Logf("netcat command output %s", output)
 
@@ -1639,12 +1638,13 @@ spec:
 		targetPodLogs, err := e2ekubectl.RunKubectl("default", "logs", "-l", "app=nginx", "--container", "udp-server")
 		framework.ExpectNoError(err, "failed to inspect logs in backend pods")
 		framework.Logf("%v", targetPodLogs)
-		lbClientIPv4, lbClientIPv6 := getContainerAddressesForNetwork(clientContainer, "clientnet")
-		framework.Logf("%v", lbClientIPv4)
-		if strings.Contains(targetPodLogs, lbClientIPv4) {
-			framework.Logf("found the expected srcIP %s!", lbClientIPv4)
-		} else if strings.Contains(targetPodLogs, lbClientIPv6) {
-			framework.Logf("found the expected srcIP %s!", lbClientIPv6)
+		clientNetNetwork := provider.Network{Name: "clientnet"}
+		lbClientInf, err := provider.Get().GetExternalContainerNetworkInterface(externalContainer, clientNetNetwork)
+		framework.ExpectNoError(err, "failed to get network interface info for network %s within external container %s", clientNetNetwork.Name, externalContainer.GetName())
+		if strings.Contains(targetPodLogs, lbClientInf.IPv4) {
+			framework.Logf("found the expected srcIP %s!", lbClientInf.IPv4)
+		} else if strings.Contains(targetPodLogs, lbClientInf.IPv6) {
+			framework.Logf("found the expected srcIP %s!", lbClientInf.IPv6)
 		} else {
 			framework.Failf("could not get expected srcIP!")
 		}
@@ -1661,13 +1661,13 @@ spec:
 		ginkgo.By("by sending a UDP packet to service " + svcName + " with type=LoadBalancer in namespace " + namespaceName + " with backend pod " + backendName)
 		// OVN drops the 1st packet so this one does nothing basically.
 		// See https://issues.redhat.com/browse/FDP-223 for details
-		output, err = runCommand(cmd...)
+		output, err = provider.Get().ExecExternalContainerCommand(externalContainer, cmd)
 		framework.ExpectNoError(err, "failed to connect to load balancer service")
 		framework.Logf("netcat command output %s", output)
 		time.Sleep(time.Second * 10) // buffer to ensure all learn flows are created correctly after the previous drop
 
 		// OVN drops the 1st packet so let's be sure to another set of netcat connections at least to check the srcIP
-		output, err = runCommand(cmd...)
+		output, err = provider.Get().ExecExternalContainerCommand(externalContainer, cmd)
 		framework.ExpectNoError(err, "failed to connect to load balancer service")
 		framework.Logf("netcat command output %s", output)
 
@@ -1676,15 +1676,14 @@ spec:
 		targetPodLogs, err = e2ekubectl.RunKubectl("default", "logs", "-l", "app=nginx", "--container", "udp-server")
 		framework.ExpectNoError(err, "failed to inspect logs in backend pods")
 		framework.Logf("%v", targetPodLogs)
-		if strings.Count(targetPodLogs, lbClientIPv4) >= 2 {
-			framework.Logf("found the expected srcIP %s!", lbClientIPv4)
-		} else if strings.Count(targetPodLogs, lbClientIPv6) >= 2 {
-			framework.Logf("found the expected srcIP %s!", lbClientIPv6)
+		if strings.Count(targetPodLogs, lbClientInf.IPv4) >= 2 {
+			framework.Logf("found the expected srcIP %s!", lbClientInf.IPv4)
+		} else if strings.Count(targetPodLogs, lbClientInf.IPv6) >= 2 {
+			framework.Logf("found the expected srcIP %s!", lbClientInf.IPv6)
 		} else {
 			framework.Failf("could not get expected srcIP!")
 		}
 	})
-
 })
 
 func getEndpointsForService(c clientset.Interface, namespace, serviceName string) (*v1.Endpoints, error) {
@@ -1706,7 +1705,10 @@ func getNodeIP(c clientset.Interface, nodeName string) (string, error) {
 
 func buildAndRunCommand(command string) error {
 	cmd := strings.Split(command, " ")
-	_, err := runCommand(cmd...)
+	output, err := exec.Command(cmd[0], cmd[1:]...).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("failed to run %q: %s (%s)", strings.Join(cmd, " "), err, output)
+	}
 	return err
 }
 
