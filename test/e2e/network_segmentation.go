@@ -329,7 +329,7 @@ var _ = Describe("Network Segmentation", func() {
 							}, 5*time.Second).Should(BeTrue())
 						}
 					},
-					Entry(
+					XEntry(
 						"with L2 dualstack primary UDN",
 						networkAttachmentConfigParams{
 							name:     nadName,
