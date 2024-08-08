@@ -261,7 +261,7 @@ func bootstrapOVSFlows(nodeName string) error {
 	// This needs to work with:
 	// - default network: patch-<bridge name>_<node>-to-br-int
 	// but not with:
-	// - secondary network: patch-<bridge name>_<node>-to-br-int
+	// - secondary network: patch-<bridge-name>_<network-name>_<node-name>-to-br-int
 	r := regexp.MustCompile(fmt.Sprintf("^patch-([^_]*)_%s-to-br-int$", nodeName))
 	for _, line := range strings.Split(portsOutput, "\n") {
 		matches := r.FindStringSubmatch(line)
