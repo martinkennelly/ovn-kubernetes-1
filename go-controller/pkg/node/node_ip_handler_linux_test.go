@@ -231,6 +231,39 @@ var _ = Describe("Node IP Handler tests", func() {
 			}, 3).Should(BeTrue())
 		})
 
+		ovntest.OnSupportedPlatformsIt("add/del/add of secondary interface IP", func() {
+			var secondaryLink netlink.Link
+			secondaryLinkAddr := &netlink.Addr{IPNet: ovntest.MustParseIPNet(dummyAdditionalIPv4CIDR)}
+			By("adding secondary link and IP address")
+			Expect(tc.ns.Do(func(netNS ns.NetNS) error {
+				secondaryLink = ovntest.AddLink("secondary")
+				return netlink.AddrAdd(secondaryLink, secondaryLinkAddr)
+			})).ShouldNot(HaveOccurred())
+			By("ensure address is added to annotation")
+			Eventually(func() bool {
+				return nodeHasAddress(tc.fakeClient, nodeName, ovntest.MustParseIPNet(dummyAdditionalIPv4CIDR))
+			}, 1, 0.1).Should(BeTrue())
+			By("delete address")
+			Expect(tc.ns.Do(func(netNS ns.NetNS) error {
+				return netlink.AddrDel(secondaryLink, secondaryLinkAddr)
+			})).ShouldNot(HaveOccurred())
+			By("ensure address is removed from annotation")
+			Eventually(func() bool {
+				return nodeHasAddress(tc.fakeClient, nodeName, ovntest.MustParseIPNet(dummyAdditionalIPv4CIDR))
+			}, 1, 0.1).Should(BeFalse())
+			By("re-apply the same address on the same interface")
+			Expect(tc.ns.Do(func(netNS ns.NetNS) error {
+				if err := netlink.AddrAdd(secondaryLink, secondaryLinkAddr); err != nil {
+					return err
+				}
+				return nil
+			})).ShouldNot(HaveOccurred())
+			By("ensure the address is added to the annotation")
+			Eventually(func() bool {
+				return nodeHasAddress(tc.fakeClient, nodeName, ovntest.MustParseIPNet(dummyAdditionalIPv4CIDR))
+			}, 1, 0.1).Should(BeTrue())
+		})
+
 		ovntest.OnSupportedPlatformsIt("allows unique local address", func() {
 			Expect(tc.ns.Do(func(netNS ns.NetNS) error {
 				link, err := netlink.LinkByName(dummyBrName)
