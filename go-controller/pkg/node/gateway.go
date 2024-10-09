@@ -526,44 +526,44 @@ type bridgeConfiguration struct {
 	eipMarkIPs  *markIPsCache
 }
 
-func (b *bridgeConfiguration) addBridgeNetConfig(nInfo util.NetInfo, masqCTMark uint) {
-	b.Lock()
-	defer b.Unlock()
-
-	netName := nInfo.GetNetworkName()
-	patchPort := nInfo.GetNetworkScopedPatchPortName(b.bridgeName, b.nodeName)
-
-	var netConfig *bridgeUDNConfiguration
-	netConfig, found := b.netConfig[netName]
-	if !found {
-		netConfig = &bridgeUDNConfiguration{
-			patchPort:  patchPort,
-			masqCTMark: fmt.Sprintf("0x%x", masqCTMark),
-		}
-
-		b.netConfig[netName] = netConfig
-	}
-
-	netConfig.patchPort = patchPort
-	netConfig.masqCTMark = fmt.Sprintf("0x%x", masqCTMark)
-}
-
-func (b *bridgeConfiguration) delBridgeNetConfig(nInfo util.NetInfo) {
-	b.Lock()
-	defer b.Unlock()
-
-	delete(b.netConfig, nInfo.GetNetworkName())
-}
-
-func (b *bridgeConfiguration) getBridgePorts() ([]bridgeUDNConfiguration, string, string) {
-	b.Lock()
-	defer b.Unlock()
-	netConfigs := make([]bridgeUDNConfiguration, len(b.netConfig))
-	for _, netConfig := range b.netConfig {
-		netConfigs = append(netConfigs, *netConfig)
-	}
-	return netConfigs, b.uplinkName, b.ofPortPhys
-}
+//func (b *bridgeConfiguration) addBridgeNetConfig(nInfo util.NetInfo, masqCTMark uint) {
+//	b.Lock()
+//	defer b.Unlock()
+//
+//	netName := nInfo.GetNetworkName()
+//	patchPort := nInfo.GetNetworkScopedPatchPortName(b.bridgeName, b.nodeName)
+//
+//	var netConfig *bridgeUDNConfiguration
+//	netConfig, found := b.netConfig[netName]
+//	if !found {
+//		netConfig = &bridgeUDNConfiguration{
+//			patchPort:  patchPort,
+//			masqCTMark: fmt.Sprintf("0x%x", masqCTMark),
+//		}
+//
+//		b.netConfig[netName] = netConfig
+//	}
+//
+//	netConfig.patchPort = patchPort
+//	netConfig.masqCTMark = fmt.Sprintf("0x%x", masqCTMark)
+//}
+//
+//func (b *bridgeConfiguration) delBridgeNetConfig(nInfo util.NetInfo) {
+//	b.Lock()
+//	defer b.Unlock()
+//
+//	delete(b.netConfig, nInfo.GetNetworkName())
+//}
+//
+//func (b *bridgeConfiguration) getBridgePorts() ([]bridgeUDNConfiguration, string, string) {
+//	b.Lock()
+//	defer b.Unlock()
+//	netConfigs := make([]bridgeUDNConfiguration, len(b.netConfig))
+//	for _, netConfig := range b.netConfig {
+//		netConfigs = append(netConfigs, *netConfig)
+//	}
+//	return netConfigs, b.uplinkName, b.ofPortPhys
+//}
 
 // updateInterfaceIPAddresses sets and returns the bridge's current ips
 func (b *bridgeConfiguration) updateInterfaceIPAddresses(node *kapi.Node) ([]*net.IPNet, error) {
