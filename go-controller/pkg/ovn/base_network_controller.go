@@ -3,6 +3,7 @@ package ovn
 import (
 	"fmt"
 	"net"
+	"reflect"
 	"sync"
 	"time"
 
@@ -31,6 +32,7 @@ import (
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
 
 	kapi "k8s.io/api/core/v1"
+	knet "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/util/sets"
@@ -91,8 +93,18 @@ type BaseNetworkController struct {
 	retryNamespaces *ovnretry.RetryFramework
 	// retry framework for network policies
 	retryNetworkPolicies *ovnretry.RetryFramework
+	// retry framework for network policies
+	retryMultiNetworkPolicies *ovnretry.RetryFramework
 	// retry framework for IPAMClaims
 	retryIPAMClaims *ovnretry.RetryFramework
+	// retry framework for egress IP
+	retryEgressIPs *ovnretry.RetryFramework
+	// retry framework for egress IP Namespaces
+	retryEgressIPNamespaces *ovnretry.RetryFramework
+	// retry framework for egress IP Pods
+	retryEgressIPPods *ovnretry.RetryFramework
+	// retry framework for Egress nodes
+	retryEgressNodes *ovnretry.RetryFramework
 
 	// pod events factory handler
 	podHandler *factory.Handler
@@ -172,6 +184,8 @@ type BaseNetworkController struct {
 	ovnClusterLRPToJoinIfAddrs []*net.IPNet
 
 	observManager *observability.Manager
+	// Controller used for programming OVN for egress IP
+	eIPC egressIPZoneController
 }
 
 // BaseSecondaryNetworkController structure holds per-network fields and network specific
@@ -181,8 +195,10 @@ type BaseSecondaryNetworkController struct {
 
 	networkID *int
 
+	// network policy events factory handler
+	netPolicyHandler *factory.Handler
 	// multi-network policy events factory handler
-	policyHandler *factory.Handler
+	multiNetPolicyHandler *factory.Handler
 }
 
 func getNetworkControllerName(netName string) string {
@@ -674,11 +690,13 @@ func (bnc *BaseNetworkController) syncNodeManagementPort(node *kapi.Node, switch
 		return nil, err
 	}
 
-	// TODO(dceara): The cluster port group must be per network.
-	err = libovsdbops.AddPortsToPortGroup(bnc.nbClient, bnc.getClusterPortGroupName(types.ClusterPortGroupNameBase), logicalSwitchPort.UUID)
-	if err != nil {
-		klog.Errorf(err.Error())
-		return nil, err
+	// TODO(dceara): The cluster port group must be per network. So for now skip adding management port to the cluster port
+	// group for secondary network's because the cluster port group is not yet created for secondary networks.
+	if bnc.IsDefault() {
+		if err = libovsdbops.AddPortsToPortGroup(bnc.nbClient, bnc.getClusterPortGroupName(types.ClusterPortGroupNameBase), logicalSwitchPort.UUID); err != nil {
+			klog.Errorf(err.Error())
+			return nil, err
+		}
 	}
 
 	if v4Subnet != nil {
@@ -700,6 +718,31 @@ func (bnc *BaseNetworkController) WatchNodes() error {
 	if err == nil {
 		bnc.nodeHandler = handler
 	}
+	return err
+}
+
+// WatchEgressNodes starts the watching of egress assignable nodes and calls
+// back the appropriate handler logic.
+func (bnc *BaseNetworkController) WatchEgressNodes() error {
+	_, err := bnc.retryEgressNodes.WatchResource()
+	return err
+}
+
+// WatchEgressIP starts the watching of egressip resource and calls back the
+// appropriate handler logic. It also initiates the other dedicated resource
+// handlers for egress IP setup: namespaces, pods.
+func (bnc *BaseNetworkController) WatchEgressIP() error {
+	_, err := bnc.retryEgressIPs.WatchResource()
+	return err
+}
+
+func (bnc *BaseNetworkController) WatchEgressIPNamespaces() error {
+	_, err := bnc.retryEgressIPNamespaces.WatchResource()
+	return err
+}
+
+func (bnc *BaseNetworkController) WatchEgressIPPods() error {
+	_, err := bnc.retryEgressIPPods.WatchResource()
 	return err
 }
 
@@ -726,6 +769,16 @@ func (bnc *BaseNetworkController) recordPodErrorEvent(pod *kapi.Pod, podErr erro
 	} else {
 		klog.V(5).Infof("Posting a %s event for Pod %s/%s", kapi.EventTypeWarning, pod.Namespace, pod.Name)
 		bnc.recorder.Eventf(podRef, kapi.EventTypeWarning, "ErrorReconcilingPod", podErr.Error())
+	}
+}
+
+func (bnc *BaseNetworkController) recordNamespaceErrorEvent(ns *kapi.Namespace, nsErr error) {
+	nsRef, err := ref.GetReference(scheme.Scheme, ns)
+	if err != nil {
+		klog.Errorf("Couldn't get a reference to Namespace %s to post an event: '%v'", ns.Name, err)
+	} else {
+		klog.V(5).Infof("Posting a %s event for Namespace %s", kapi.EventTypeWarning, ns.Name)
+		bnc.recorder.Eventf(nsRef, kapi.EventTypeWarning, "ErrorReconcilingNamespace", nsErr.Error())
 	}
 }
 
@@ -798,7 +851,7 @@ func (bnc *BaseNetworkController) getActiveNetworkForNamespace(namespace string)
 	return bnc.nadController.GetActiveNetworkForNamespace(namespace)
 }
 
-// GetNetworkRole returns the role of this controller's
+// GetNetworkRoleForPod returns the role of this controller's
 // network for the given pod
 // Expected values are:
 // (1) "primary" if this network is the primary network of the pod.
@@ -821,7 +874,7 @@ func (bnc *BaseNetworkController) getActiveNetworkForNamespace(namespace string)
 // NOTE: Like in other places, expectation is this function is always called
 // from controller's that have some relation to the given pod, unrelated
 // networks are treated as secondary networks so caller has to be careful
-func (bnc *BaseNetworkController) GetNetworkRole(pod *kapi.Pod) (string, error) {
+func (bnc *BaseNetworkController) GetNetworkRoleForPod(pod *kapi.Pod) (string, error) {
 	if !util.IsNetworkSegmentationSupportEnabled() {
 		// if user defined network segmentation is not enabled
 		// then we know pod's primary network is "default" and
@@ -845,6 +898,58 @@ func (bnc *BaseNetworkController) GetNetworkRole(pod *kapi.Pod) (string, error) 
 		// if default network was not the primary network,
 		// then when UDN is turned on, default network is the
 		// infrastructure-locked network forthis pod
+		return types.NetworkRoleInfrastructure, nil
+	}
+	return types.NetworkRoleSecondary, nil
+}
+
+// GetNetworkRoleForNamespace returns the role of this controller's
+// network for the given namespace
+// Expected values are:
+// (1) "primary" if this network is the primary network of the namespace.
+//
+//	The "default" network is the primary network of any namespace usually
+//	unless user-defined-network-segmentation feature has been activated.
+//	If network segmentation feature is enabled then any user defined
+//	network can be the primary network of the namespace.
+//
+// (2) "secondary" if this network is the secondary network of the namespace.
+//
+//	Only user defined networks can be secondary networks for a namespace.
+//
+// (3) "infrastructure-locked" is applicable only to "default" network if
+//
+//	a user defined network is the "primary" network for this namespace. This
+//	signifies the "default" network is only used for probing and
+//	is otherwise locked for all intents and purposes.
+//
+// NOTE: Like in other places, expectation is this function is always called
+// from controller's that have some relation to the given namespace, unrelated
+// networks are treated as secondary networks so caller has to be careful
+func (bnc *BaseNetworkController) GetNetworkRoleForNamespace(ns *kapi.Namespace) (string, error) {
+	if !util.IsNetworkSegmentationSupportEnabled() {
+		// if user defined network segmentation is not enabled
+		// then we know pod's primary network is "default" and
+		// pod's secondary network is not its NOT primary network
+		if bnc.IsDefault() {
+			return types.NetworkRolePrimary, nil
+		}
+		return types.NetworkRoleSecondary, nil
+	}
+	activeNetwork, err := bnc.getActiveNetworkForNamespace(ns.Name)
+	if err != nil {
+		if util.IsUnprocessedActiveNetworkError(err) {
+			bnc.recordNamespaceErrorEvent(ns, err)
+		}
+		return "", err
+	}
+	if activeNetwork.GetNetworkName() == bnc.GetNetworkName() {
+		return types.NetworkRolePrimary, nil
+	}
+	if bnc.IsDefault() {
+		// if default network was not the primary network,
+		// then when UDN is turned on, default network is the
+		// infrastructure-locked network for this namespace
 		return types.NetworkRoleInfrastructure, nil
 	}
 	return types.NetworkRoleSecondary, nil
@@ -926,6 +1031,52 @@ func (bnc *BaseNetworkController) findMigratablePodIPsForSubnets(subnets []*net.
 		}
 	}
 	return ipList, nil
+}
+
+func (bnc *BaseNetworkController) AddResourceCommon(objType reflect.Type, obj interface{}) error {
+	switch objType {
+	case factory.PolicyType:
+		np, ok := obj.(*knet.NetworkPolicy)
+		if !ok {
+			return fmt.Errorf("could not cast %T object to *knet.NetworkPolicy", obj)
+		}
+		netinfo, err := bnc.getActiveNetworkForNamespace(np.Namespace)
+		if err != nil {
+			return fmt.Errorf("could not get active network for namespace %s: %v", np.Namespace, err)
+		}
+		if bnc.GetNetworkName() != netinfo.GetNetworkName() {
+			return nil
+		}
+		if err := bnc.addNetworkPolicy(np); err != nil {
+			klog.Infof("Network Policy add failed for %s/%s, will try again later: %v",
+				np.Namespace, np.Name, err)
+			return err
+		}
+	default:
+		klog.Errorf("Can not process add resource event, object type %s is not supported", objType)
+	}
+	return nil
+}
+
+func (bnc *BaseNetworkController) DeleteResourceCommon(objType reflect.Type, obj interface{}) error {
+	switch objType {
+	case factory.PolicyType:
+		knp, ok := obj.(*knet.NetworkPolicy)
+		if !ok {
+			return fmt.Errorf("could not cast obj of type %T to *knet.NetworkPolicy", obj)
+		}
+		netinfo, err := bnc.getActiveNetworkForNamespace(knp.Namespace)
+		if err != nil {
+			return fmt.Errorf("could not get active network for namespace %s: %v", knp.Namespace, err)
+		}
+		if bnc.GetNetworkName() != netinfo.GetNetworkName() {
+			return nil
+		}
+		return bnc.deleteNetworkPolicy(knp)
+	default:
+		klog.Errorf("Can not process delete resource event, object type %s is not supported", objType)
+	}
+	return nil
 }
 
 func initLoadBalancerGroups(nbClient libovsdbclient.Client, netInfo util.NetInfo) (

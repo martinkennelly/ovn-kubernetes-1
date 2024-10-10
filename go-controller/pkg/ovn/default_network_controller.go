@@ -25,6 +25,7 @@ import (
 	dnsnameresolver "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/ovn/dns_name_resolver"
 	aclsyncer "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/ovn/external_ids_syncer/acl"
 	addrsetsyncer "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/ovn/external_ids_syncer/address_set"
+	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/ovn/external_ids_syncer/logical_router_policy"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/ovn/external_ids_syncer/port_group"
 	lsm "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/ovn/logical_switch_manager"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/ovn/topology"
@@ -93,9 +94,6 @@ type DefaultNetworkController struct {
 	// Controller in charge of services
 	svcController *svccontroller.Controller
 
-	// Controller used for programming OVN for egress IP
-	eIPC egressIPZoneController
-
 	// Controller used to handle egress services
 	egressSvcController *egresssvc.Controller
 	// Controller used for programming OVN for Admin Network Policy
@@ -111,15 +109,6 @@ type DefaultNetworkController struct {
 
 	// retry framework for egress firewall
 	retryEgressFirewalls *retry.RetryFramework
-
-	// retry framework for egress IP
-	retryEgressIPs *retry.RetryFramework
-	// retry framework for egress IP Namespaces
-	retryEgressIPNamespaces *retry.RetryFramework
-	// retry framework for egress IP Pods
-	retryEgressIPPods *retry.RetryFramework
-	// retry framework for Egress nodes
-	retryEgressNodes *retry.RetryFramework
 
 	// Node-specific syncMaps used by node event handler
 	gatewaysFailed              sync.Map
@@ -214,17 +203,18 @@ func newDefaultNetworkControllerCommon(cnci *CommonNetworkControllerInfo,
 			cancelableCtx:               util.NewCancelableContext(),
 			observManager:               observManager,
 			nadController:               nadController,
+			eIPC: egressIPZoneController{
+				NetInfo:            &util.DefaultNetInfo{},
+				nodeUpdateMutex:    &sync.Mutex{},
+				podAssignmentMutex: &sync.Mutex{},
+				podAssignment:      make(map[string]*podAssignmentState),
+				nbClient:           cnci.nbClient,
+				watchFactory:       cnci.watchFactory,
+				nodeZoneState:      syncmap.NewSyncMap[bool](),
+				controllerName:     DefaultNetworkControllerName,
+			},
 		},
-		externalGatewayRouteInfo: apbExternalRouteController.ExternalGWRouteInfoCache,
-		eIPC: egressIPZoneController{
-			NetInfo:            &util.DefaultNetInfo{},
-			nodeUpdateMutex:    &sync.Mutex{},
-			podAssignmentMutex: &sync.Mutex{},
-			podAssignment:      make(map[string]*podAssignmentState),
-			nbClient:           cnci.nbClient,
-			watchFactory:       cnci.watchFactory,
-			nodeZoneState:      syncmap.NewSyncMap[bool](),
-		},
+		externalGatewayRouteInfo:   apbExternalRouteController.ExternalGWRouteInfoCache,
 		loadbalancerClusterCache:   make(map[kapi.Protocol]string),
 		zoneChassisHandler:         zoneChassisHandler,
 		apbExternalRouteController: apbExternalRouteController,
@@ -322,6 +312,12 @@ func (oc *DefaultNetworkController) syncDb() error {
 	err = oc.cleanupPodSelectorAddressSets()
 	if err != nil {
 		return fmt.Errorf("cleaning up stale pod selector address sets for network %v failed : %w", oc.GetNetworkName(), err)
+	}
+
+	// LRP syncer must only be run once and because default controller always runs, it can perform LRP updates.
+	lrpSyncer := logical_router_policy.NewLRPSyncer(oc.nbClient, oc.controllerName)
+	if err = lrpSyncer.Sync(); err != nil {
+		return fmt.Errorf("failed to sync logical router policies: %v", err)
 	}
 	return nil
 }
@@ -727,18 +723,6 @@ func (h *defaultNetworkControllerEventHandler) AddResource(obj interface{}, from
 		}
 		return h.oc.ensurePod(nil, pod, true)
 
-	case factory.PolicyType:
-		np, ok := obj.(*knet.NetworkPolicy)
-		if !ok {
-			return fmt.Errorf("could not cast %T object to *knet.NetworkPolicy", obj)
-		}
-
-		if err = h.oc.addNetworkPolicy(np); err != nil {
-			klog.Infof("Network Policy add failed for %s/%s, will try again later: %v",
-				np.Namespace, np.Name, err)
-			return err
-		}
-
 	case factory.NodeType:
 		node, ok := obj.(*kapi.Node)
 		if !ok {
@@ -844,10 +828,8 @@ func (h *defaultNetworkControllerEventHandler) AddResource(obj interface{}, from
 		return h.oc.AddNamespace(ns)
 
 	default:
-		return fmt.Errorf("no add function for object type %s", h.objType)
+		return h.oc.AddResourceCommon(h.objType, obj)
 	}
-
-	return nil
 }
 
 // UpdateResource updates the specified object in the cluster to its version in newObj according to its
@@ -1031,13 +1013,6 @@ func (h *defaultNetworkControllerEventHandler) DeleteResource(obj, cachedObj int
 		}
 		return h.oc.removePod(pod, portInfo)
 
-	case factory.PolicyType:
-		knp, ok := obj.(*knet.NetworkPolicy)
-		if !ok {
-			return fmt.Errorf("could not cast obj of type %T to *knet.NetworkPolicy", obj)
-		}
-		return h.oc.deleteNetworkPolicy(knp)
-
 	case factory.NodeType:
 		node, ok := obj.(*kapi.Node)
 		if !ok {
@@ -1084,7 +1059,7 @@ func (h *defaultNetworkControllerEventHandler) DeleteResource(obj, cachedObj int
 		return h.oc.deleteNamespace(ns)
 
 	default:
-		return fmt.Errorf("object type %s not supported", h.objType)
+		return h.oc.DeleteResourceCommon(h.objType, obj)
 	}
 }
 

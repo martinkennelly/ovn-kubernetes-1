@@ -176,8 +176,26 @@ func (oc *DefaultNetworkController) ensureLocalZonePod(oldPod, pod *kapi.Pod, ad
 		}
 	}
 
+	// update open ports for UDN pods on pod update.
+	if util.IsNetworkSegmentationSupportEnabled() && !util.PodWantsHostNetwork(pod) && !addPort &&
+		pod != nil && oldPod != nil &&
+		pod.Annotations[util.UDNOpenPortsAnnotationName] != oldPod.Annotations[util.UDNOpenPortsAnnotationName] {
+		networkRole, err := oc.GetNetworkRoleForPod(pod)
+		if err != nil {
+			return err
+		}
+		if networkRole != ovntypes.NetworkRolePrimary {
+			// only update for non-default network pods
+			portName := oc.GetLogicalPortName(pod, oc.GetNetworkName())
+			err := oc.setUDNPodOpenPorts(pod.Namespace+"/"+pod.Name, pod.Annotations, portName)
+			if err != nil {
+				return fmt.Errorf("failed to update UDN pod  %s/%s open ports: %w", pod.Namespace, pod.Name, err)
+			}
+		}
+	}
+
 	if kubevirt.IsPodLiveMigratable(pod) {
-		return kubevirt.EnsureLocalZonePodAddressesToNodeRoute(oc.watchFactory, oc.nbClient, oc.lsManager, pod, ovntypes.DefaultNetworkName)
+		return kubevirt.EnsureLocalZonePodAddressesToNodeRoute(oc.watchFactory, oc.nbClient, oc.lsManager, pod, ovntypes.DefaultNetworkName, util.GetAllClusterSubnets())
 	}
 
 	return nil
@@ -277,12 +295,10 @@ func (oc *DefaultNetworkController) removeLocalZonePod(pod *kapi.Pod, portInfo *
 // It removes the remote pod ips from the namespace address set and if its an external gw pod, removes
 // its routes.
 func (oc *DefaultNetworkController) removeRemoteZonePod(pod *kapi.Pod) error {
-	if util.PodWantsHostNetwork(pod) {
-		// Delete the routes in the namespace associated with this remote pod if it was acting as an external GW
-		if err := oc.deletePodExternalGW(pod); err != nil {
-			return fmt.Errorf("unable to delete external gateway routes for remote pod %s: %w",
-				getPodNamespacedName(pod), err)
-		}
+	// Delete the routes in the namespace associated with this remote pod if it was acting as an external GW
+	if err := oc.deletePodExternalGW(pod); err != nil {
+		return fmt.Errorf("unable to delete external gateway routes for remote pod %s: %w",
+			getPodNamespacedName(pod), err)
 	}
 
 	// while this check is only intended for local pods, we also need it for
@@ -319,31 +335,6 @@ func (oc *DefaultNetworkController) removeRemoteZonePod(pod *kapi.Pod) error {
 // back the appropriate handler logic
 func (oc *DefaultNetworkController) WatchEgressFirewall() error {
 	_, err := oc.retryEgressFirewalls.WatchResource()
-	return err
-}
-
-// WatchEgressNodes starts the watching of egress assignable nodes and calls
-// back the appropriate handler logic.
-func (oc *DefaultNetworkController) WatchEgressNodes() error {
-	_, err := oc.retryEgressNodes.WatchResource()
-	return err
-}
-
-// WatchEgressIP starts the watching of egressip resource and calls back the
-// appropriate handler logic. It also initiates the other dedicated resource
-// handlers for egress IP setup: namespaces, pods.
-func (oc *DefaultNetworkController) WatchEgressIP() error {
-	_, err := oc.retryEgressIPs.WatchResource()
-	return err
-}
-
-func (oc *DefaultNetworkController) WatchEgressIPNamespaces() error {
-	_, err := oc.retryEgressIPNamespaces.WatchResource()
-	return err
-}
-
-func (oc *DefaultNetworkController) WatchEgressIPPods() error {
-	_, err := oc.retryEgressIPPods.WatchResource()
 	return err
 }
 
@@ -462,13 +453,15 @@ func (oc *DefaultNetworkController) StartServiceController(wg *sync.WaitGroup, r
 func (oc *DefaultNetworkController) InitEgressServiceZoneController() (*egresssvc_zone.Controller, error) {
 	// If the EgressIP controller is enabled it will take care of creating the
 	// "no reroute" policies - we can pass "noop" functions to the egress service controller.
-	initClusterEgressPolicies := func(libovsdbclient.Client, addressset.AddressSetFactory, string, string) error { return nil }
-	ensureNodeNoReroutePolicies := func(libovsdbclient.Client, addressset.AddressSetFactory, string, string, listers.NodeLister) error {
+	initClusterEgressPolicies := func(libovsdbclient.Client, addressset.AddressSetFactory, []*net.IPNet, string, ...string) error {
+		return nil
+	}
+	ensureNodeNoReroutePolicies := func(libovsdbclient.Client, addressset.AddressSetFactory, string, string, listers.NodeLister, bool, bool) error {
 		return nil
 	}
 	deleteLegacyDefaultNoRerouteNodePolicies := func(libovsdbclient.Client, string, string) error { return nil }
 	// used only when IC=true
-	createDefaultNodeRouteToExternal := func(libovsdbclient.Client, string, string) error { return nil }
+	createDefaultNodeRouteToExternal := func(libovsdbclient.Client, string, string, []*net.IPNet) error { return nil }
 
 	if !config.OVNKubernetesFeature.EnableEgressIP {
 		initClusterEgressPolicies = InitClusterEgressPolicies
