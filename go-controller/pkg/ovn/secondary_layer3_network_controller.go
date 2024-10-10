@@ -270,6 +270,9 @@ func (h *secondaryLayer3NetworkControllerEventHandler) UpdateResource(oldObj, ne
 		h.oc.eIPC.nodeZoneState.LockKey(newNode.Name)
 		h.oc.eIPC.nodeZoneState.Store(newNode.Name, h.oc.isLocalZoneNode(newNode))
 		h.oc.eIPC.nodeZoneState.UnlockKey(newNode.Name)
+		if err := h.oc.addEgressNode(newNode); err != nil {
+			return err
+		}
 		// try to add the 103 qos rule to new node's switch if it doesn't exist
 		// The reason we call this from update is because in case the add node event
 		// did not succeed and we got an update node event which overrides the add event
