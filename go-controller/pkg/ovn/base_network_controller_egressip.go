@@ -1,6 +1,7 @@
 package ovn
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -24,6 +25,7 @@ import (
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/nbdb"
 	addressset "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/ovn/address_set"
 	egresssvc "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/ovn/controller/egressservice"
+	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/ovn/controller/udnenabledsvc"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/syncmap"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/types"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
@@ -35,6 +37,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/util/sets"
+	"k8s.io/apimachinery/pkg/util/wait"
 	listers "k8s.io/client-go/listers/core/v1"
 	"k8s.io/client-go/util/retry"
 	"k8s.io/klog/v2"
@@ -50,14 +53,15 @@ const (
 	NodeIPAddrSetName             egressIPAddrSetName = "node-ips"
 	EgressIPServedPodsAddrSetName egressIPAddrSetName = "egressip-served-pods"
 	// the possible values for LRP DB objects for EIPs
-	IPFamilyValueV4       egressIPFamilyValue         = "ip4"
-	IPFamilyValueV6       egressIPFamilyValue         = "ip6"
-	IPFamilyValue         egressIPFamilyValue         = "ip" // use it when its dualstack
-	ReplyTrafficNoReroute egressIPNoReroutePolicyName = "EIP-No-Reroute-reply-traffic"
-	NoReRoutePodToPod     egressIPNoReroutePolicyName = "EIP-No-Reroute-Pod-To-Pod"
-	NoReRoutePodToJoin    egressIPNoReroutePolicyName = "EIP-No-Reroute-Pod-To-Join"
-	NoReRoutePodToNode    egressIPNoReroutePolicyName = "EIP-No-Reroute-Pod-To-Node"
-	ReplyTrafficMark      egressIPQoSRuleName         = "EgressIP-Mark-Reply-Traffic"
+	IPFamilyValueV4         egressIPFamilyValue         = "ip4"
+	IPFamilyValueV6         egressIPFamilyValue         = "ip6"
+	IPFamilyValue           egressIPFamilyValue         = "ip" // use it when its dualstack
+	ReplyTrafficNoReroute   egressIPNoReroutePolicyName = "EIP-No-Reroute-reply-traffic"
+	NoReRoutePodToPod       egressIPNoReroutePolicyName = "EIP-No-Reroute-Pod-To-Pod"
+	NoReRoutePodToJoin      egressIPNoReroutePolicyName = "EIP-No-Reroute-Pod-To-Join"
+	NoReRoutePodToNode      egressIPNoReroutePolicyName = "EIP-No-Reroute-Pod-To-Node"
+	NoReRouteUDNPodToCDNSvc egressIPNoReroutePolicyName = "EIP-No-Reroute-Pod-To-CDN-Svc"
+	ReplyTrafficMark        egressIPQoSRuleName         = "EgressIP-Mark-Reply-Traffic"
 )
 
 func getEgressIPAddrSetDbIDs(name egressIPAddrSetName, controller string) *libovsdbops.DbObjectIDs {
@@ -1701,11 +1705,14 @@ func (bnc *BaseNetworkController) addEgressNode(node *v1.Node) error {
 // egress node experiences problems we want to move all egress IP assignment
 // away from that node elsewhere so that the pods using the egress IP can
 // continue to do so without any issues.
+// Also, create allow policies for UDN enabled services aka UDN pod connecting
+// to an allowed set of CDN services.
 func (bnc *BaseNetworkController) initClusterEgressPolicies(nodes []interface{}) error {
 	subnets := util.GetAllClusterSubnetsFromEntries(bnc.Subnets())
-	if err := InitClusterEgressPolicies(bnc.nbClient, bnc.addressSetFactory, subnets, bnc.controllerName, bnc.GetNetworkScopedClusterRouterName()); err != nil {
+	if err := InitClusterEgressPolicies(bnc.nbClient, bnc.addressSetFactory, subnets, bnc.IsDefault(), bnc.controllerName, bnc.GetNetworkScopedClusterRouterName()); err != nil {
 		return fmt.Errorf("failed to initialize networks cluster logical router egress policies: %v", err)
 	}
+
 	for _, node := range nodes {
 		node := node.(*kapi.Node)
 
@@ -1719,7 +1726,7 @@ func (bnc *BaseNetworkController) initClusterEgressPolicies(nodes []interface{})
 // InitClusterEgressPolicies creates the global no reroute policies and address-sets
 // required by the egressIP and egressServices features.
 func InitClusterEgressPolicies(nbClient libovsdbclient.Client, addressSetFactory addressset.AddressSetFactory,
-	clusterSubnets []*net.IPNet, controllerName string, routers ...string) error {
+	clusterSubnets []*net.IPNet, isDefault bool, controllerName string, routers ...string) error {
 	var v4ClusterSubnet, v6ClusterSubnet []*net.IPNet
 	for _, subnet := range clusterSubnets {
 		if utilnet.IsIPv6CIDR(subnet) {
@@ -1778,6 +1785,15 @@ func InitClusterEgressPolicies(nbClient libovsdbclient.Client, addressSetFactory
 	_, err = addressSetFactory.EnsureAddressSet(dbIDs)
 	if err != nil {
 		return fmt.Errorf("cannot ensure that addressSet for egressService pods %s exists %v", egresssvc.EgressServiceServedPodsAddrSetName, err)
+	}
+
+	if !isDefault && util.IsNetworkSegmentationSupportEnabled() {
+		v4, v6 := len(v4ClusterSubnet) > 0, len(v6ClusterSubnet) > 0
+		for _, router := range routers {
+			if err = ensureDefaultNoRerouteUDNEnabledSvcPolicies(nbClient, addressSetFactory, controllerName, router, v4, v6); err != nil {
+				return fmt.Errorf("failed to ensure no reroute for UDN enabled services: %v", err)
+			}
+		}
 	}
 
 	return nil
@@ -2842,6 +2858,75 @@ func ensureDefaultNoRerouteNodePolicies(nbClient libovsdbclient.Client, addressS
 		dbIDs = getEgressIPLRPNoReRoutePodToNodeDbIDs(IPFamilyValueV6, controllerName)
 		if err := createLogicalRouterPolicy(nbClient, clusterRouter, matchV6, types.DefaultNoRereoutePriority, options, dbIDs); err != nil {
 			return fmt.Errorf("unable to create IPv6 no-reroute node policies, err: %v", err)
+		}
+	}
+	return nil
+}
+
+func ensureDefaultNoRerouteUDNEnabledSvcPolicies(nbClient libovsdbclient.Client, addressSetFactory addressset.AddressSetFactory,
+	controllerName, clusterRouter string, v4, v6 bool) error {
+	var err error
+	var as addressset.AddressSet
+	// fetch the egressIP pods address-set
+	dbIDs := getEgressIPAddrSetDbIDs(EgressIPServedPodsAddrSetName, controllerName)
+	if as, err = addressSetFactory.GetAddressSet(dbIDs); err != nil {
+		return fmt.Errorf("cannot ensure that addressSet %s exists %v", EgressIPServedPodsAddrSetName, err)
+	}
+	ipv4EgressIPServedPodsAS, ipv6EgressIPServedPodsAS := as.GetASHashNames()
+
+	// fetch the egressService pods address-set
+	dbIDs = egresssvc.GetEgressServiceAddrSetDbIDs(controllerName)
+	if as, err = addressSetFactory.GetAddressSet(dbIDs); err != nil {
+		return fmt.Errorf("cannot ensure that addressSet %s exists %v", egresssvc.EgressServiceServedPodsAddrSetName, err)
+	}
+	ipv4EgressServiceServedPodsAS, ipv6EgressServiceServedPodsAS := as.GetASHashNames()
+
+	dbIDs = udnenabledsvc.GetAddressSetDBIDs()
+	var ipv4UDNEnabledSvcAS, ipv6UDNEnabledSvcAS string
+	// address set maybe not created immediately
+	err = wait.PollUntilContextTimeout(context.Background(), 100*time.Millisecond, 5*time.Second, true, func(ctx context.Context) (done bool, err error) {
+
+		as, err := addressSetFactory.GetAddressSet(dbIDs)
+		if err != nil {
+			klog.V(5).Infof("Failed to get UDN enabled service address set, retrying: %v", err)
+			return false, nil
+		}
+		ipv4UDNEnabledSvcAS, ipv6UDNEnabledSvcAS = as.GetASHashNames()
+		if ipv4UDNEnabledSvcAS == "" && ipv6UDNEnabledSvcAS == "" { // only one IP family is required
+			return false, nil
+		}
+		return true, nil
+	})
+	if err != nil {
+		return fmt.Errorf("failed to retrieve UDN enabled service address set from NB DB: %v", err)
+	}
+
+	var matchV4, matchV6 string
+	// construct the policy match
+	if v4 && ipv4UDNEnabledSvcAS != "" {
+		matchV4 = fmt.Sprintf(`(ip4.src == $%s || ip4.src == $%s) && ip4.dst == $%s`,
+			ipv4EgressIPServedPodsAS, ipv4EgressServiceServedPodsAS, ipv4UDNEnabledSvcAS)
+	}
+	if v6 && ipv6UDNEnabledSvcAS != "" {
+		if ipv6EgressIPServedPodsAS == "" || ipv6EgressServiceServedPodsAS == "" || ipv6UDNEnabledSvcAS == "" {
+			return fmt.Errorf("address set hash name(s) %s not found", as.GetName())
+		}
+		matchV6 = fmt.Sprintf(`(ip6.src == $%s || ip6.src == $%s) && ip6.dst == $%s`,
+			ipv6EgressIPServedPodsAS, ipv6EgressServiceServedPodsAS, ipv6UDNEnabledSvcAS)
+	}
+
+	// Create global allow policy for UDN enabled service traffic
+	if v4 && matchV4 != "" {
+		dbIDs = getEgressIPLRPNoReRouteDbIDs(types.DefaultNoRereoutePriority, NoReRouteUDNPodToCDNSvc, IPFamilyValueV4, controllerName)
+		if err := createLogicalRouterPolicy(nbClient, clusterRouter, matchV4, types.DefaultNoRereoutePriority, nil, dbIDs); err != nil {
+			return fmt.Errorf("unable to create IPv4 no-rerouteUDN pod to CDN svc, err: %v", err)
+		}
+	}
+
+	if v6 && matchV6 != "" {
+		dbIDs = getEgressIPLRPNoReRouteDbIDs(types.DefaultNoRereoutePriority, NoReRouteUDNPodToCDNSvc, IPFamilyValueV6, controllerName)
+		if err := createLogicalRouterPolicy(nbClient, clusterRouter, matchV6, types.DefaultNoRereoutePriority, nil, dbIDs); err != nil {
+			return fmt.Errorf("unable to create IPv6 no-reroute UDN pod to CDN svc policies, err: %v", err)
 		}
 	}
 	return nil
