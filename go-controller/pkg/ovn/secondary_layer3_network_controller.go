@@ -279,6 +279,11 @@ func (h *secondaryLayer3NetworkControllerEventHandler) UpdateResource(oldObj, ne
 			if err := h.oc.ensureDefaultNoRerouteQoSRules(newNode.Name); err != nil {
 				return err
 			}
+			// may need to add the egress node again to ensure the LRSR is created because an add may not complete due
+			// to a race with OVN logical constructs creation.
+			if err := h.oc.addEgressNode(newNode); err != nil {
+				return fmt.Errorf("failed to ensure egress node %s: %v", newNode.Name, err)
+			}
 		}
 		// update the nodeIP in the defalt-reRoute (102 priority) destination address-set
 		if util.NodeHostCIDRsAnnotationChanged(oldNode, newNode) {
