@@ -115,7 +115,9 @@ const (
 	EgressSVCReroutePriority              = 101
 	EgressIPReroutePriority               = 100
 	EgressIPRerouteQoSRulePriority        = 103
-	EgressLiveMigrationReroutePiority     = 10
+	// priority of logical router policies on a nodes gateway router
+	EgressIPSNATMarkPriority          = 95
+	EgressLiveMigrationReroutePiority = 10
 
 	// EndpointSliceMirrorControllerName mirror EndpointSlice controller name (used as a value for the "endpointslice.kubernetes.io/managed-by" label)
 	EndpointSliceMirrorControllerName = "endpointslice-mirror-controller.k8s.ovn.org"
@@ -186,6 +188,8 @@ const (
 
 	// key for network name external-id
 	NetworkExternalID = OvnK8sPrefix + "/" + "network"
+	// key for node name external-id
+	NodeExternalID = OvnK8sPrefix + "/" + "node"
 	// key for network role external-id: possible values are "default", "primary", "secondary"
 	NetworkRoleExternalID = OvnK8sPrefix + "/" + "role"
 	// key for NAD name external-id, only used for secondary logical switch port of a pod

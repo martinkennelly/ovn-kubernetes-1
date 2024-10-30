@@ -116,7 +116,7 @@ type BaseNetworkController struct {
 	ipamClaimsReconciler *persistentips.IPAMClaimReconciler
 
 	// A cache of all logical ports known to the controller
-	logicalPortCache *portCache
+	logicalPortCache *PortCache
 
 	// Info about known namespaces. You must use oc.getNamespaceLocked() or
 	// oc.waitForNamespaceLocked() to read this map, and oc.createNamespaceLocked()
@@ -683,9 +683,12 @@ func (bnc *BaseNetworkController) syncNodeManagementPort(node *kapi.Node, switch
 	// TODO(dceara): The cluster port group must be per network. So for now skip adding management port to the cluster port
 	// group for secondary network's because the cluster port group is not yet created for secondary networks.
 	if bnc.IsDefault() {
-		if err = libovsdbops.AddPortsToPortGroup(bnc.nbClient, bnc.getClusterPortGroupName(types.ClusterPortGroupNameBase), logicalSwitchPort.UUID); err != nil {
-			klog.Errorf(err.Error())
-			return nil, err
+		clusterPortGroupName := bnc.getClusterPortGroupName(types.ClusterPortGroupNameBase)
+		if err = libovsdbops.AddPortsToPortGroup(bnc.nbClient, clusterPortGroupName, logicalSwitchPort.UUID); err != nil {
+			err1 := fmt.Errorf("failed to add port %s to cluster port group %s (%s): %w",
+				logicalSwitchPort.Name, types.ClusterPortGroupNameBase, clusterPortGroupName, err)
+			klog.Error(err1)
+			return nil, err1
 		}
 	}
 
@@ -734,6 +737,16 @@ func (bnc *BaseNetworkController) recordPodErrorEvent(pod *kapi.Pod, podErr erro
 	} else {
 		klog.V(5).Infof("Posting a %s event for Pod %s/%s", kapi.EventTypeWarning, pod.Namespace, pod.Name)
 		bnc.recorder.Eventf(podRef, kapi.EventTypeWarning, "ErrorReconcilingPod", podErr.Error())
+	}
+}
+
+func (bnc *BaseNetworkController) recordNamespaceErrorEvent(ns *kapi.Namespace, nsErr error) {
+	nsRef, err := ref.GetReference(scheme.Scheme, ns)
+	if err != nil {
+		klog.Errorf("Couldn't get a reference to Namespace %s to post an event: '%v'", ns.Name, err)
+	} else {
+		klog.V(5).Infof("Posting a %s event for Namespace %s", kapi.EventTypeWarning, ns.Name)
+		bnc.recorder.Eventf(nsRef, kapi.EventTypeWarning, "ErrorReconcilingNamespace", nsErr.Error())
 	}
 }
 
@@ -806,7 +819,7 @@ func (bnc *BaseNetworkController) getActiveNetworkForNamespace(namespace string)
 	return bnc.nadController.GetActiveNetworkForNamespace(namespace)
 }
 
-// GetNetworkRole returns the role of this controller's
+// GetNetworkRoleForPod returns the role of this controller's
 // network for the given pod
 // Expected values are:
 // (1) "primary" if this network is the primary network of the pod.
@@ -829,7 +842,7 @@ func (bnc *BaseNetworkController) getActiveNetworkForNamespace(namespace string)
 // NOTE: Like in other places, expectation is this function is always called
 // from controller's that have some relation to the given pod, unrelated
 // networks are treated as secondary networks so caller has to be careful
-func (bnc *BaseNetworkController) GetNetworkRole(pod *kapi.Pod) (string, error) {
+func (bnc *BaseNetworkController) GetNetworkRoleForPod(pod *kapi.Pod) (string, error) {
 	if !util.IsNetworkSegmentationSupportEnabled() {
 		// if user defined network segmentation is not enabled
 		// then we know pod's primary network is "default" and
@@ -853,6 +866,58 @@ func (bnc *BaseNetworkController) GetNetworkRole(pod *kapi.Pod) (string, error) 
 		// if default network was not the primary network,
 		// then when UDN is turned on, default network is the
 		// infrastructure-locked network forthis pod
+		return types.NetworkRoleInfrastructure, nil
+	}
+	return types.NetworkRoleSecondary, nil
+}
+
+// GetNetworkRoleForNamespace returns the role of this controller's
+// network for the given namespace
+// Expected values are:
+// (1) "primary" if this network is the primary network of the namespace.
+//
+//	The "default" network is the primary network of any namespace usually
+//	unless user-defined-network-segmentation feature has been activated.
+//	If network segmentation feature is enabled then any user defined
+//	network can be the primary network of the namespace.
+//
+// (2) "secondary" if this network is the secondary network of the namespace.
+//
+//	Only user defined networks can be secondary networks for a namespace.
+//
+// (3) "infrastructure-locked" is applicable only to "default" network if
+//
+//	a user defined network is the "primary" network for this namespace. This
+//	signifies the "default" network is only used for probing and
+//	is otherwise locked for all intents and purposes.
+//
+// NOTE: Like in other places, expectation is this function is always called
+// from controller's that have some relation to the given namespace, unrelated
+// networks are treated as secondary networks so caller has to be careful
+func (bnc *BaseNetworkController) GetNetworkRoleForNamespace(ns *kapi.Namespace) (string, error) {
+	if !util.IsNetworkSegmentationSupportEnabled() {
+		// if user defined network segmentation is not enabled
+		// then we know pod's primary network is "default" and
+		// pod's secondary network is not its NOT primary network
+		if bnc.IsDefault() {
+			return types.NetworkRolePrimary, nil
+		}
+		return types.NetworkRoleSecondary, nil
+	}
+	activeNetwork, err := bnc.getActiveNetworkForNamespace(ns.Name)
+	if err != nil {
+		if util.IsUnprocessedActiveNetworkError(err) {
+			bnc.recordNamespaceErrorEvent(ns, err)
+		}
+		return "", err
+	}
+	if activeNetwork.GetNetworkName() == bnc.GetNetworkName() {
+		return types.NetworkRolePrimary, nil
+	}
+	if bnc.IsDefault() {
+		// if default network was not the primary network,
+		// then when UDN is turned on, default network is the
+		// infrastructure-locked network for this namespace
 		return types.NetworkRoleInfrastructure, nil
 	}
 	return types.NetworkRoleSecondary, nil

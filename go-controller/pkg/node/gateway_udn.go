@@ -153,6 +153,10 @@ type bridgeUDNConfiguration struct {
 	v6MasqIPs   *udn.MasqueradeIPs
 }
 
+func (netConfig *bridgeUDNConfiguration) isDefaultNetwork() bool {
+	return netConfig.masqCTMark == ctMarkOVN
+}
+
 func (netConfig *bridgeUDNConfiguration) setBridgeNetworkOfPortsInternal() error {
 	ofportPatch, stderr, err := util.GetOVSOfPort("get", "Interface", netConfig.patchPort, "ofport")
 	if err != nil {
@@ -199,7 +203,7 @@ func NewUserDefinedNetworkGateway(netInfo util.NetInfo, networkID int, node *v1.
 
 	gw, ok := defaultNetworkGateway.(*gateway)
 	if !ok {
-		return nil, fmt.Errorf("unable to deference default node network controller gateway object")
+		return nil, fmt.Errorf("unable to dereference default node network controller gateway object")
 	}
 
 	return &UserDefinedNetworkGateway{

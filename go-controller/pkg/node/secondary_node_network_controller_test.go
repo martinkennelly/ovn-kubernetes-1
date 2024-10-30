@@ -8,7 +8,7 @@ import (
 
 	"github.com/containernetworking/plugins/pkg/ns"
 	"github.com/containernetworking/plugins/pkg/testutils"
-	. "github.com/onsi/ginkgo"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"github.com/stretchr/testify/mock"
 	"github.com/vishvananda/netlink"
@@ -99,7 +99,7 @@ var _ = Describe("SecondaryNodeNetworkController", func() {
 
 		networkID, err := controller.getNetworkID()
 		Expect(err).To(HaveOccurred())
-		Expect(networkID).To(Equal(util.InvalidNetworkID))
+		Expect(networkID).To(Equal(util.InvalidID))
 	})
 	It("ensure UDNGateway is not invoked when feature gate is OFF", func() {
 		config.OVNKubernetesFeature.EnableNetworkSegmentation = false
