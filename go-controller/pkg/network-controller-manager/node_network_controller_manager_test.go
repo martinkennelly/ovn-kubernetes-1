@@ -6,7 +6,7 @@ import (
 
 	"github.com/containernetworking/plugins/pkg/ns"
 	"github.com/containernetworking/plugins/pkg/testutils"
-	. "github.com/onsi/ginkgo"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/config"
 	factoryMocks "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/factory/mocks"
@@ -224,6 +224,8 @@ var _ = Describe("Healthcheck tests", func() {
 			factoryMock.On("GetNodes").Return(nodeList, nil)
 			factoryMock.On("NADInformer").Return(nil)
 			factoryMock.On("UserDefinedNetworkInformer").Return(nil)
+			factoryMock.On("ClusterUserDefinedNetworkInformer").Return(nil)
+			factoryMock.On("NamespaceInformer").Return(nil)
 
 			ncm, err := NewNodeNetworkControllerManager(fakeClient, &factoryMock, nodeName, &sync.WaitGroup{}, nil, routeManager)
 			Expect(err).NotTo(HaveOccurred())

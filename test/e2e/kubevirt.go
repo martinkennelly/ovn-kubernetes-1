@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"net/netip"
 	"os"
 	"os/exec"
 	"strings"
@@ -14,6 +15,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/config"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
 	"github.com/ovn-org/ovn-kubernetes/test/e2e/diagnostics"
 	"github.com/ovn-org/ovn-kubernetes/test/e2e/kubevirt"
@@ -71,6 +73,10 @@ func newControllerRuntimeClient() (crclient.Client, error) {
 	if err != nil {
 		return nil, err
 	}
+	err = corev1.AddToScheme(scheme)
+	if err != nil {
+		return nil, err
+	}
 	return crclient.New(config, crclient.Options{
 		Scheme: scheme,
 	})
@@ -120,7 +126,7 @@ var _ = Describe("Kubevirt Virtual Machines", func() {
 		sendEcho = func(conn *net.TCPConn) error {
 			strEcho := "Halo"
 
-			if err := conn.SetDeadline(time.Now().Add(2 * time.Second)); err != nil {
+			if err := conn.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
 				return fmt.Errorf("failed configuring connection deadline: %w", err)
 			}
 			_, err := conn.Write([]byte(strEcho))
@@ -201,20 +207,18 @@ var _ = Describe("Kubevirt Virtual Machines", func() {
 			return endpoints, nil
 		}
 
-		/*
-
-			reconnect = func(conns []*net.TCPConn) error {
-				for i, conn := range conns {
-					conn.Close()
-					conn, err := dial(conn.RemoteAddr().String())
-					if err != nil {
-						return err
-					}
-					conns[i] = conn
+		reconnect = func(conns []*net.TCPConn) error {
+			for i, conn := range conns {
+				conn.Close()
+				conn, err := dial(conn.RemoteAddr().String())
+				if err != nil {
+					return err
 				}
-				return nil
+				conns[i] = conn
 			}
-		*/
+			return nil
+		}
+
 		composeService = func(name, vmName string, port int32) *corev1.Service {
 			ipFamilyPolicy := corev1.IPFamilyPolicyPreferDualStack
 			return &corev1.Service{
@@ -303,8 +307,8 @@ var _ = Describe("Kubevirt Virtual Machines", func() {
 		checkPodRunningReady = func() func(Gomega, *corev1.Pod) {
 			return func(g Gomega, pod *corev1.Pod) {
 				ok, err := testutils.PodRunningReady(pod)
-				Expect(err).ToNot(HaveOccurred())
-				Expect(ok).To(BeTrue())
+				g.Expect(err).ToNot(HaveOccurred())
+				g.Expect(ok).To(BeTrue())
 			}
 		}
 
@@ -339,10 +343,17 @@ var _ = Describe("Kubevirt Virtual Machines", func() {
 			}
 			err := crClient.Get(context.TODO(), crclient.ObjectKeyFromObject(vmi), vmi)
 			Expect(err).ToNot(HaveOccurred())
-			polling := 15 * time.Second
-			timeout := time.Minute
+			polling := 6 * time.Second
+			timeout := 2 * time.Minute
 			step := by(vmName, stage+": Check tcp connection is not broken")
-			Eventually(func() error { return sendEchos(endpoints) }).
+			Eventually(func() error {
+				err = sendEchos(endpoints)
+				if err != nil {
+					by(vmName, fmt.Sprintf("%s: Check tcp connection failed: %s", stage, err))
+					_ = reconnect(endpoints)
+				}
+				return err
+			}).
 				WithPolling(polling).
 				WithTimeout(timeout).
 				Should(Succeed(), step)
@@ -872,10 +883,11 @@ passwd:
 			}()
 
 			By("Wait some time for service to settle")
-			time.Sleep(2 * time.Second)
-
-			endpoints, err := dialServiceNodePort(svc)
-			Expect(err).ToNot(HaveOccurred(), step)
+			endpoints := []*net.TCPConn{}
+			Eventually(func() error {
+				endpoints, err = dialServiceNodePort(svc)
+				return err
+			}).WithPolling(time.Second).WithTimeout(20*time.Second).Should(Succeed(), "Should dial service port once service settled")
 
 			checkConnectivityAndNetworkPolicies(vm.Name, endpoints, "before live migration")
 			// Do just one migration that will fail
@@ -1028,6 +1040,9 @@ passwd:
 			if td.mode == kubevirtv1.MigrationPostCopy && os.Getenv("GITHUB_ACTIONS") == "true" {
 				Skip("Post copy live migration not working at github actions")
 			}
+			if td.mode == kubevirtv1.MigrationPostCopy && os.Getenv("KUBEVIRT_SKIP_MIGRATE_POST_COPY") == "true" {
+				Skip("Post copy live migration explicitly skipped")
+			}
 			var (
 				err error
 			)
@@ -1088,13 +1103,15 @@ passwd:
 				By("annotating the VMI with `fail fast`")
 				vmKey := types.NamespacedName{Namespace: namespace, Name: "worker1"}
 				var vmi kubevirtv1.VirtualMachineInstance
+
 				Eventually(func() error {
-					return crClient.Get(context.TODO(), vmKey, &vmi)
+					err = crClient.Get(context.TODO(), vmKey, &vmi)
+					if err == nil {
+						vmi.ObjectMeta.Annotations[kubevirtv1.FuncTestLauncherFailFastAnnotation] = "true"
+						err = crClient.Update(context.TODO(), &vmi)
+					}
+					return err
 				}).WithPolling(time.Second).WithTimeout(time.Minute).Should(Succeed())
-
-				vmi.ObjectMeta.Annotations[kubevirtv1.FuncTestLauncherFailFastAnnotation] = "true"
-
-				Expect(crClient.Update(context.TODO(), &vmi)).To(Succeed())
 			}
 
 			for _, vm := range vms {
@@ -1195,7 +1212,7 @@ passwd:
 						}, butane)
 					Expect(err).ToNot(HaveOccurred())
 					vm.Spec.Template.Spec.Domain.Devices.Interfaces[0].Bridge = nil
-					vm.Spec.Template.Spec.Domain.Devices.Interfaces[0].Binding = &kubevirtv1.PluginBinding{Name: "passt"}
+					vm.Spec.Template.Spec.Domain.Devices.Interfaces[0].Binding = &kubevirtv1.PluginBinding{Name: "managedTap"}
 					createVirtualMachine(vm)
 					return vm.Name
 				},
@@ -1226,7 +1243,7 @@ passwd:
 						}, butane)
 					Expect(err).ToNot(HaveOccurred())
 					vmi.Spec.Domain.Devices.Interfaces[0].Bridge = nil
-					vmi.Spec.Domain.Devices.Interfaces[0].Binding = &kubevirtv1.PluginBinding{Name: "passt"}
+					vmi.Spec.Domain.Devices.Interfaces[0].Binding = &kubevirtv1.PluginBinding{Name: "managedTap"}
 					createVirtualMachineInstance(vmi)
 					return vmi.Name
 				},
@@ -1311,11 +1328,7 @@ passwd:
 
 			step := by(vmi.Name, "Login to virtual machine for the first time")
 			Eventually(func() error {
-				if td.role != "primary" {
-					return kubevirt.LoginToFedora(vmi, "core", "fedora")
-				} else {
-					return kubevirt.LoginToFedoraWithHostname(vmi, "core", "fedora", "localhost")
-				}
+				return kubevirt.LoginToFedora(vmi, "core", "fedora")
 			}).
 				WithTimeout(5*time.Second).
 				WithPolling(time.Second).
@@ -1344,11 +1357,7 @@ passwd:
 			td.test.cmd()
 
 			step = by(vm.Name, fmt.Sprintf("Login to virtual machine after %s %s", td.resource.description, td.test.description))
-			if td.role != "primary" {
-				Expect(kubevirt.LoginToFedora(vmi, "core", "fedora")).To(Succeed(), step)
-			} else {
-				Expect(kubevirt.LoginToFedoraWithHostname(vmi, "core", "fedora", "localhost")).To(Succeed(), step)
-			}
+			Expect(kubevirt.LoginToFedora(vmi, "core", "fedora")).To(Succeed(), step)
 			var obtainedAddresses []string
 
 			if td.role != "primary" { // expect 2 addresses on dual-stack deployments; 1 on single-stack
@@ -1419,5 +1428,131 @@ passwd:
 				role:     "primary",
 			}),
 		)
+	})
+	Context("with kubevirt VM using layer2 UDPN", func() {
+		var (
+			podName                 = "virt-launcher-vm1"
+			cidrIPv4                = "10.128.0.0/24"
+			cidrIPv6                = "2010:100:200::/60"
+			primaryUDNNetworkStatus nadapi.NetworkStatus
+			virtLauncherCommand     = func(command string) (string, error) {
+				stdout, stderr, err := ExecShellInPodWithFullOutput(fr, namespace, podName, command)
+				if err != nil {
+					return "", fmt.Errorf("%s: %s: %w", stdout, stderr, err)
+				}
+				return stdout, nil
+			}
+			primaryUDNValueFor = func(ty, field string) ([]string, error) {
+				output, err := virtLauncherCommand(fmt.Sprintf(`nmcli -e no -g %s %s show ovn-udn1`, field, ty))
+				if err != nil {
+					return nil, err
+				}
+				return strings.Split(output, " | "), nil
+			}
+			primaryUDNValueForConnection = func(field string) ([]string, error) {
+				return primaryUDNValueFor("connection", field)
+			}
+			primaryUDNValueForDevice = func(field string) ([]string, error) {
+				return primaryUDNValueFor("device", field)
+			}
+		)
+		BeforeEach(func() {
+			netConfig := newNetworkAttachmentConfig(
+				networkAttachmentConfigParams{
+					namespace: namespace,
+					name:      "net1",
+					topology:  "layer2",
+					cidr:      correctCIDRFamily(cidrIPv4, cidrIPv6),
+					role:      "primary",
+					mtu:       1300,
+				})
+			By("Creating NetworkAttachmentDefinition")
+			Expect(crClient.Create(context.Background(), generateNAD(netConfig))).To(Succeed())
+
+			By("Create virt-launcher pod")
+			kubevirtPod := kubevirt.GenerateFakeVirtLauncherPod(namespace, "vm1")
+			Expect(crClient.Create(context.Background(), kubevirtPod)).To(Succeed())
+
+			By("Wait for virt-launcher pod to be ready and primary UDN network status to pop up")
+			waitForPodsCondition([]*corev1.Pod{kubevirtPod}, func(g Gomega, pod *corev1.Pod) {
+				ok, err := testutils.PodRunningReady(pod)
+				g.Expect(err).ToNot(HaveOccurred())
+				g.Expect(ok).To(BeTrue())
+
+				primaryUDNNetworkStatuses, err := podNetworkStatus(pod, func(networkStatus nadapi.NetworkStatus) bool {
+					return networkStatus.Default
+				})
+				g.Expect(err).ToNot(HaveOccurred())
+				g.Expect(primaryUDNNetworkStatuses).To(HaveLen(1))
+				primaryUDNNetworkStatus = primaryUDNNetworkStatuses[0]
+			})
+
+			By("Wait NetworkManager readiness")
+			Eventually(func() error {
+				_, err := virtLauncherCommand("systemctl is-active NetworkManager")
+				return err
+			}).
+				WithTimeout(5 * time.Second).
+				WithPolling(time.Second).
+				Should(Succeed())
+
+			By("Reconfigure primary UDN interface to use dhcp/nd for ipv4 and ipv6")
+			_, err := virtLauncherCommand(kubevirt.GenerateAddressDiscoveryConfigurationCommand("ovn-udn1"))
+			Expect(err).ToNot(HaveOccurred())
+
+		})
+		It("should configure IPv4 and IPv6 using DHCP and NDP", func() {
+			dnsService, err := fr.ClientSet.CoreV1().Services(config.Kubernetes.DNSServiceNamespace).
+				Get(context.Background(), config.Kubernetes.DNSServiceName, metav1.GetOptions{})
+			Expect(err).ToNot(HaveOccurred())
+
+			if isIPv4Supported() {
+				expectedIP, err := matchIPv4StringFamily(primaryUDNNetworkStatus.IPs)
+				Expect(err).ToNot(HaveOccurred())
+
+				expectedDNS, err := matchIPv4StringFamily(dnsService.Spec.ClusterIPs)
+				Expect(err).ToNot(HaveOccurred())
+
+				_, cidr, err := net.ParseCIDR(cidrIPv4)
+				Expect(err).ToNot(HaveOccurred())
+				expectedGateway := util.GetNodeGatewayIfAddr(cidr).IP.String()
+
+				Eventually(primaryUDNValueForConnection).
+					WithArguments("DHCP4.OPTION").
+					WithTimeout(10 * time.Second).
+					WithPolling(time.Second).
+					Should(ContainElements(
+						"host_name = vm1",
+						fmt.Sprintf("ip_address = %s", expectedIP),
+						fmt.Sprintf("domain_name_servers = %s", expectedDNS),
+						fmt.Sprintf("routers = %s", expectedGateway),
+						fmt.Sprintf("interface_mtu = 1300"),
+					))
+				Expect(primaryUDNValueForConnection("IP4.ADDRESS")).To(ConsistOf(expectedIP + "/24"))
+				Expect(primaryUDNValueForConnection("IP4.GATEWAY")).To(ConsistOf(expectedGateway))
+				Expect(primaryUDNValueForConnection("IP4.DNS")).To(ConsistOf(expectedDNS))
+				Expect(primaryUDNValueForDevice("GENERAL.MTU")).To(ConsistOf("1300"))
+			}
+
+			if isIPv6Supported() {
+				expectedIP, err := matchIPv6StringFamily(primaryUDNNetworkStatus.IPs)
+				Expect(err).ToNot(HaveOccurred())
+				Eventually(primaryUDNValueFor).
+					WithArguments("connection", "DHCP6.OPTION").
+					WithTimeout(10 * time.Second).
+					WithPolling(time.Second).
+					Should(ContainElements(
+						"fqdn_fqdn = vm1",
+						fmt.Sprintf("ip6_address = %s", expectedIP),
+					))
+				Expect(primaryUDNValueForConnection("IP6.ADDRESS")).To(SatisfyAll(HaveLen(2), ContainElements(expectedIP+"/128")))
+				Expect(primaryUDNValueForConnection("IP6.GATEWAY")).To(ConsistOf(WithTransform(func(ipv6 string) bool {
+					return netip.MustParseAddr(ipv6).IsLinkLocalUnicast()
+				}, BeTrue())))
+				Expect(primaryUDNValueForConnection("IP6.ROUTE")).To(ContainElement(ContainSubstring(fmt.Sprintf("dst = %s", cidrIPv6))))
+				Expect(primaryUDNValueForDevice("GENERAL.MTU")).To(ConsistOf("1300"))
+			}
+
+		})
 	})
 })

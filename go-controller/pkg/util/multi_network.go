@@ -18,7 +18,6 @@ import (
 
 	ovncnitypes "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/cni/types"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/config"
-	userdefinednetworkv1 "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/userdefinednetwork/v1"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/types"
 )
 
@@ -44,6 +43,7 @@ type BasicNetInfo interface {
 	JoinSubnets() []*net.IPNet
 	Vlan() uint
 	AllowsPersistentIPs() bool
+	PhysicalNetworkName() string
 
 	// utility methods
 	Equals(BasicNetInfo) bool
@@ -265,6 +265,11 @@ func (nInfo *DefaultNetInfo) AllowsPersistentIPs() bool {
 	return false
 }
 
+// PhysicalNetworkName has no impact on defaultNetConfInfo (localnet feature)
+func (nInfo *DefaultNetInfo) PhysicalNetworkName() string {
+	return ""
+}
+
 // SecondaryNetInfo holds the network name information for secondary network if non-nil
 type secondaryNetInfo struct {
 	netName string
@@ -285,6 +290,8 @@ type secondaryNetInfo struct {
 	// to be plumbed for this network
 	sync.Mutex
 	nadNames sets.Set[string]
+
+	physicalNetworkName string
 }
 
 // GetNetworkName returns the network name
@@ -434,6 +441,11 @@ func (nInfo *secondaryNetInfo) AllowsPersistentIPs() bool {
 	return nInfo.allowPersistentIPs
 }
 
+// PhysicalNetworkName returns the user provided physical network name value
+func (nInfo *secondaryNetInfo) PhysicalNetworkName() string {
+	return nInfo.physicalNetworkName
+}
+
 // IPMode returns the ipv4/ipv6 mode
 func (nInfo *secondaryNetInfo) IPMode() (bool, bool) {
 	return nInfo.ipv4mode, nInfo.ipv6mode
@@ -519,18 +531,19 @@ func (nInfo *secondaryNetInfo) copy() *secondaryNetInfo {
 
 	// everything is immutable except the NADs
 	c := &secondaryNetInfo{
-		netName:            nInfo.netName,
-		primaryNetwork:     nInfo.primaryNetwork,
-		topology:           nInfo.topology,
-		mtu:                nInfo.mtu,
-		vlan:               nInfo.vlan,
-		allowPersistentIPs: nInfo.allowPersistentIPs,
-		ipv4mode:           nInfo.ipv4mode,
-		ipv6mode:           nInfo.ipv6mode,
-		subnets:            nInfo.subnets,
-		excludeSubnets:     nInfo.excludeSubnets,
-		joinSubnets:        nInfo.joinSubnets,
-		nadNames:           nInfo.nadNames.Clone(),
+		netName:             nInfo.netName,
+		primaryNetwork:      nInfo.primaryNetwork,
+		topology:            nInfo.topology,
+		mtu:                 nInfo.mtu,
+		vlan:                nInfo.vlan,
+		allowPersistentIPs:  nInfo.allowPersistentIPs,
+		ipv4mode:            nInfo.ipv4mode,
+		ipv6mode:            nInfo.ipv6mode,
+		subnets:             nInfo.subnets,
+		excludeSubnets:      nInfo.excludeSubnets,
+		joinSubnets:         nInfo.joinSubnets,
+		nadNames:            nInfo.nadNames.Clone(),
+		physicalNetworkName: nInfo.physicalNetworkName,
 	}
 
 	return c
@@ -589,14 +602,15 @@ func newLocalnetNetConfInfo(netconf *ovncnitypes.NetConf) (NetInfo, error) {
 	}
 
 	ni := &secondaryNetInfo{
-		netName:            netconf.Name,
-		topology:           types.LocalnetTopology,
-		subnets:            subnets,
-		excludeSubnets:     excludes,
-		mtu:                netconf.MTU,
-		vlan:               uint(netconf.VLANID),
-		allowPersistentIPs: netconf.AllowPersistentIPs,
-		nadNames:           sets.Set[string]{},
+		netName:             netconf.Name,
+		topology:            types.LocalnetTopology,
+		subnets:             subnets,
+		excludeSubnets:      excludes,
+		mtu:                 netconf.MTU,
+		vlan:                uint(netconf.VLANID),
+		allowPersistentIPs:  netconf.AllowPersistentIPs,
+		nadNames:            sets.Set[string]{},
+		physicalNetworkName: netconf.PhysicalNetworkName,
 	}
 	ni.ipv4mode, ni.ipv6mode = getIPMode(subnets)
 	return ni, nil
@@ -814,7 +828,7 @@ func ValidateNetConf(nadName string, netconf *ovncnitypes.NetConf) error {
 
 	if netconf.Topology != types.LocalnetTopology && netconf.Name != types.DefaultNetworkName {
 		if err := subnetOverlapCheck(netconf); err != nil {
-			return fmt.Errorf("invalid subnet cnfiguration: %w", err)
+			return fmt.Errorf("invalid subnet configuration: %w", err)
 		}
 	}
 
@@ -990,6 +1004,12 @@ func IsNetworkSegmentationSupportEnabled() bool {
 	return config.OVNKubernetesFeature.EnableMultiNetwork && config.OVNKubernetesFeature.EnableNetworkSegmentation
 }
 
+func IsRouteAdvertisementsEnabled() bool {
+	// for now, we require multi-network to be enabled because we rely on NADs,
+	// even for the default network
+	return config.OVNKubernetesFeature.EnableMultiNetwork && config.OVNKubernetesFeature.EnableRouteAdvertisements
+}
+
 func DoesNetworkRequireIPAM(netInfo NetInfo) bool {
 	return !((netInfo.TopologyType() == types.Layer2Topology || netInfo.TopologyType() == types.LocalnetTopology) && len(netInfo.Subnets()) == 0)
 }
@@ -1011,16 +1031,4 @@ func AllowsPersistentIPs(netInfo NetInfo) bool {
 	default:
 		return false
 	}
-}
-
-func IsPrimaryNetwork(spec userdefinednetworkv1.UserDefinedNetworkSpec) bool {
-	var role userdefinednetworkv1.NetworkRole
-	switch spec.Topology {
-	case userdefinednetworkv1.NetworkTopologyLayer3:
-		role = spec.Layer3.Role
-	case userdefinednetworkv1.NetworkTopologyLayer2:
-		role = spec.Layer2.Role
-	}
-
-	return role == userdefinednetworkv1.NetworkRolePrimary
 }

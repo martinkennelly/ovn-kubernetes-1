@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	. "github.com/onsi/ginkgo"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/config"
@@ -86,6 +86,7 @@ var _ = Describe("Node healthcheck tests", func() {
 	)
 
 	BeforeEach(func() {
+		config.PrepareTestConfig()
 		stopCh = make(chan struct{})
 		wg = &sync.WaitGroup{}
 		os.Setenv("POD_NAME", ovnkNodePodName)

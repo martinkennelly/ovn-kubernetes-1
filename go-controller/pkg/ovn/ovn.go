@@ -124,10 +124,10 @@ func (oc *DefaultNetworkController) ensurePod(oldPod, pod *kapi.Pod, addPort boo
 		return nil
 	}
 
-	// skip the pods on no host subnet nodes
+	// Add podIPs on no host subnet Nodes to the namespace address_set
 	switchName := pod.Spec.NodeName
 	if oc.lsManager.IsNonHostSubnetSwitch(switchName) {
-		return nil
+		return oc.ensureRemotePodIP(oldPod, pod, addPort)
 	}
 
 	if oc.isPodScheduledinLocalZone(pod) {
@@ -195,17 +195,14 @@ func (oc *DefaultNetworkController) ensureLocalZonePod(oldPod, pod *kapi.Pod, ad
 	}
 
 	if kubevirt.IsPodLiveMigratable(pod) {
-		return kubevirt.EnsureLocalZonePodAddressesToNodeRoute(oc.watchFactory, oc.nbClient, oc.lsManager, pod, ovntypes.DefaultNetworkName)
+		v4Subnets, v6Subnets := util.GetClusterSubnetsWithHostPrefix()
+		return kubevirt.EnsureLocalZonePodAddressesToNodeRoute(oc.watchFactory, oc.nbClient, oc.lsManager, pod, ovntypes.DefaultNetworkName, append(v4Subnets, v6Subnets...))
 	}
 
 	return nil
 }
 
-// ensureRemoteZonePod tries to set up remote zone pod bits required to interconnect it.
-//   - Adds the remote pod ips to the pod namespace address set for network policy and egress gw
-//
-// It returns nil on success and error on failure; failure indicates the pod set up should be retried later.
-func (oc *DefaultNetworkController) ensureRemoteZonePod(oldPod, pod *kapi.Pod, addPort bool) error {
+func (oc *DefaultNetworkController) ensureRemotePodIP(oldPod, pod *kapi.Pod, addPort bool) error {
 	if (addPort || (oldPod != nil && len(pod.Status.PodIPs) != len(oldPod.Status.PodIPs))) && !util.PodWantsHostNetwork(pod) {
 		podIfAddrs, err := util.GetPodCIDRsWithFullMask(pod, oc.NetInfo)
 		if err != nil {
@@ -216,6 +213,17 @@ func (oc *DefaultNetworkController) ensureRemoteZonePod(oldPod, pod *kapi.Pod, a
 		if err := oc.addRemotePodToNamespace(pod.Namespace, podIfAddrs); err != nil {
 			return fmt.Errorf("failed to add remote pod %s/%s to namespace: %w", pod.Namespace, pod.Name, err)
 		}
+	}
+	return nil
+}
+
+// ensureRemoteZonePod tries to set up remote zone pod bits required to interconnect it.
+//   - Adds the remote pod ips to the pod namespace address set for network policy and egress gw
+//
+// It returns nil on success and error on failure; failure indicates the pod set up should be retried later.
+func (oc *DefaultNetworkController) ensureRemoteZonePod(oldPod, pod *kapi.Pod, addPort bool) error {
+	if err := oc.ensureRemotePodIP(oldPod, pod, addPort); err != nil {
+		return err
 	}
 
 	//FIXME: Update comments & reduce code duplication.
@@ -478,13 +486,19 @@ func (oc *DefaultNetworkController) StartServiceController(wg *sync.WaitGroup, r
 func (oc *DefaultNetworkController) InitEgressServiceZoneController() (*egresssvc_zone.Controller, error) {
 	// If the EgressIP controller is enabled it will take care of creating the
 	// "no reroute" policies - we can pass "noop" functions to the egress service controller.
-	initClusterEgressPolicies := func(libovsdbclient.Client, addressset.AddressSetFactory, string, string) error { return nil }
-	ensureNodeNoReroutePolicies := func(libovsdbclient.Client, addressset.AddressSetFactory, string, string, listers.NodeLister) error {
+	initClusterEgressPolicies := func(nbClient libovsdbclient.Client, addressSetFactory addressset.AddressSetFactory, ni util.NetInfo,
+		clusterSubnets []*net.IPNet, controllerName, routerName string) error {
+		return nil
+	}
+	ensureNodeNoReroutePolicies := func(nbClient libovsdbclient.Client, addressSetFactory addressset.AddressSetFactory,
+		network, router, controller string, nodeLister listers.NodeLister, v4, v6 bool) error {
 		return nil
 	}
 	deleteLegacyDefaultNoRerouteNodePolicies := func(libovsdbclient.Client, string, string) error { return nil }
 	// used only when IC=true
-	createDefaultNodeRouteToExternal := func(libovsdbclient.Client, string, string) error { return nil }
+	createDefaultNodeRouteToExternal := func(nbClient libovsdbclient.Client, clusterRouter, gwRouterName string, clusterSubnets []config.CIDRNetworkEntry) error {
+		return nil
+	}
 
 	if !config.OVNKubernetesFeature.EnableEgressIP {
 		initClusterEgressPolicies = InitClusterEgressPolicies

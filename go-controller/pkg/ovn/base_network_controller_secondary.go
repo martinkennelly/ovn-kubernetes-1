@@ -17,6 +17,7 @@ import (
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/config"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/factory"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/generator/udn"
+	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/kubevirt"
 	libovsdbops "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/libovsdb/ops"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/metrics"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/nbdb"
@@ -25,6 +26,7 @@ import (
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
 	utilerrors "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util/errors"
 
+	corev1 "k8s.io/api/core/v1"
 	kapi "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/klog/v2"
@@ -229,12 +231,28 @@ func (bsnc *BaseSecondaryNetworkController) ensurePodForSecondaryNetwork(pod *ka
 		return nil
 	}
 
-	if util.PodWantsHostNetwork(pod) && !addPort {
+	if util.PodWantsHostNetwork(pod) {
+		return nil
+	}
+
+	var kubevirtLiveMigrationStatus *kubevirt.LiveMigrationStatus
+	var err error
+
+	if kubevirt.IsPodAllowedForMigration(pod, bsnc.NetInfo) {
+		kubevirtLiveMigrationStatus, err = kubevirt.DiscoverLiveMigrationStatus(bsnc.watchFactory, pod)
+		if err != nil {
+			return fmt.Errorf("failed to discover Live-migration status: %w", err)
+		}
+	}
+	updatePort := kubevirtLiveMigrationStatus != nil && pod.Name == kubevirtLiveMigrationStatus.TargetPod.Name
+
+	if !addPort && !updatePort {
 		return nil
 	}
 
 	// If a node does not have an assigned hostsubnet don't wait for the logical switch to appear
-	switchName, err := bsnc.getExpectedSwitchName(pod)
+	var switchName string
+	switchName, err = bsnc.getExpectedSwitchName(pod)
 	if err != nil {
 		return err
 	}
@@ -268,7 +286,7 @@ func (bsnc *BaseSecondaryNetworkController) ensurePodForSecondaryNetwork(pod *ka
 
 	var errs []error
 	for nadName, network := range networkMap {
-		if err = bsnc.addLogicalPortToNetworkForNAD(pod, nadName, switchName, network); err != nil {
+		if err = bsnc.addLogicalPortToNetworkForNAD(pod, nadName, switchName, network, kubevirtLiveMigrationStatus); err != nil {
 			errs = append(errs, fmt.Errorf("failed to add logical port of Pod %s/%s for NAD %s: %w", pod.Namespace, pod.Name, nadName, err))
 		}
 	}
@@ -279,7 +297,7 @@ func (bsnc *BaseSecondaryNetworkController) ensurePodForSecondaryNetwork(pod *ka
 }
 
 func (bsnc *BaseSecondaryNetworkController) addLogicalPortToNetworkForNAD(pod *kapi.Pod, nadName, switchName string,
-	network *nadapi.NetworkSelectionElement) error {
+	network *nadapi.NetworkSelectionElement, kubevirtLiveMigrationStatus *kubevirt.LiveMigrationStatus) error {
 	var libovsdbExecuteTime time.Duration
 
 	start := time.Now()
@@ -294,6 +312,15 @@ func (bsnc *BaseSecondaryNetworkController) addLogicalPortToNetworkForNAD(pod *k
 	var lsp *nbdb.LogicalSwitchPort
 	var newlyCreated bool
 
+	var lspEnabled *bool
+	// actions on the pods' LSP are only triggerred from the target pod
+	shouldHandleLiveMigration := kubevirtLiveMigrationStatus != nil && pod.Name == kubevirtLiveMigrationStatus.TargetPod.Name
+	if shouldHandleLiveMigration {
+		// LSP should be altered inside addLogicalPortToNetwork() before ops are generated because one cannot append
+		// multiple ops regarding the same object in the same transact, so passing enabled parameter.
+		lspEnabled = ptr.To(kubevirtLiveMigrationStatus.IsTargetDomainReady())
+	}
+
 	// we need to create a logical port for all local pods
 	// we also need to create a remote logical port for remote pods on layer2
 	// topologies with interconnect
@@ -301,7 +328,7 @@ func (bsnc *BaseSecondaryNetworkController) addLogicalPortToNetworkForNAD(pod *k
 	requiresLogicalPort := isLocalPod || bsnc.isLayer2Interconnect()
 
 	if requiresLogicalPort {
-		ops, lsp, podAnnotation, newlyCreated, err = bsnc.addLogicalPortToNetwork(pod, nadName, network)
+		ops, lsp, podAnnotation, newlyCreated, err = bsnc.addLogicalPortToNetwork(pod, nadName, network, lspEnabled)
 		if err != nil {
 			return err
 		}
@@ -325,6 +352,14 @@ func (bsnc *BaseSecondaryNetworkController) addLogicalPortToNetworkForNAD(pod *k
 		bsnc.logicalPortCache.remove(pod, nadName)
 	}
 
+	if shouldHandleLiveMigration &&
+		kubevirtLiveMigrationStatus.IsTargetDomainReady() {
+		ops, err = bsnc.disableLiveMigrationSourceLSPOps(kubevirtLiveMigrationStatus, nadName, ops)
+		if err != nil {
+			return fmt.Errorf("failed to create LSP ops for source pod during Live-migration status: %w", err)
+		}
+	}
+
 	if podAnnotation == nil {
 		podAnnotation, err = util.UnmarshalPodAnnotation(pod.Annotations, nadName)
 		if err != nil {
@@ -332,9 +367,14 @@ func (bsnc *BaseSecondaryNetworkController) addLogicalPortToNetworkForNAD(pod *k
 		}
 	}
 
-	if bsnc.doesNetworkRequireIPAM() && util.IsMultiNetworkPoliciesSupportEnabled() {
+	if bsnc.doesNetworkRequireIPAM() &&
+		(util.IsMultiNetworkPoliciesSupportEnabled() || (util.IsNetworkSegmentationSupportEnabled() && bsnc.IsPrimaryNetwork())) {
 		// Ensure the namespace/nsInfo exists
-		addOps, err := bsnc.addPodToNamespaceForSecondaryNetwork(pod.Namespace, podAnnotation.IPs)
+		portUUID := ""
+		if lsp != nil {
+			portUUID = lsp.UUID
+		}
+		addOps, err := bsnc.addPodToNamespaceForSecondaryNetwork(pod.Namespace, podAnnotation.IPs, portUUID)
 		if err != nil {
 			return err
 		}
@@ -369,6 +409,11 @@ func (bsnc *BaseSecondaryNetworkController) addLogicalPortToNetworkForNAD(pod *k
 
 	if lsp != nil {
 		_ = bsnc.logicalPortCache.add(pod, switchName, nadName, lsp.UUID, podAnnotation.MAC, podAnnotation.IPs)
+		if bsnc.requireDHCP(pod) {
+			if err := bsnc.ensureDHCP(pod, podAnnotation, lsp); err != nil {
+				return err
+			}
+		}
 	}
 
 	if isLocalPod {
@@ -422,7 +467,8 @@ func (bsnc *BaseSecondaryNetworkController) removePodForSecondaryNetwork(pod *ka
 
 	// otherwise just delete pod IPs from the namespace address set
 	if !hasLogicalPort {
-		if bsnc.doesNetworkRequireIPAM() && util.IsMultiNetworkPoliciesSupportEnabled() {
+		if bsnc.doesNetworkRequireIPAM() &&
+			(util.IsMultiNetworkPoliciesSupportEnabled() || (util.IsNetworkSegmentationSupportEnabled() && bsnc.IsPrimaryNetwork())) {
 			return bsnc.removeRemoteZonePodFromNamespaceAddressSet(pod)
 		}
 
@@ -461,6 +507,11 @@ func (bsnc *BaseSecondaryNetworkController) removePodForSecondaryNetwork(pod *ka
 			return err
 		}
 
+		if kubevirt.IsPodAllowedForMigration(pod, bsnc.NetInfo) {
+			if err = bsnc.enableSourceLSPFailedLiveMigration(pod, nadName); err != nil {
+				return err
+			}
+		}
 		bsnc.logicalPortCache.remove(pod, nadName)
 		pInfo, err := bsnc.deletePodLogicalPort(pod, portInfoMap[nadName], nadName)
 		if err != nil {
@@ -628,8 +679,7 @@ func (bsnc *BaseSecondaryNetworkController) syncPodsForSecondaryNetwork(pods []i
 }
 
 // addPodToNamespaceForSecondaryNetwork returns the ops needed to add pod's IP to the namespace's address set.
-func (bsnc *BaseSecondaryNetworkController) addPodToNamespaceForSecondaryNetwork(ns string, ips []*net.IPNet) ([]ovsdb.Operation, error) {
-	var ops []ovsdb.Operation
+func (bsnc *BaseSecondaryNetworkController) addPodToNamespaceForSecondaryNetwork(ns string, ips []*net.IPNet, portUUID string) ([]ovsdb.Operation, error) {
 	var err error
 	nsInfo, nsUnlock, err := bsnc.ensureNamespaceLockedForSecondaryNetwork(ns, true, nil)
 	if err != nil {
@@ -638,11 +688,7 @@ func (bsnc *BaseSecondaryNetworkController) addPodToNamespaceForSecondaryNetwork
 
 	defer nsUnlock()
 
-	if ops, err = nsInfo.addressSet.AddAddressesReturnOps(util.IPNetsIPToStringSlice(ips)); err != nil {
-		return nil, err
-	}
-
-	return ops, nil
+	return bsnc.addLocalPodToNamespaceLocked(nsInfo, ips, portUUID)
 }
 
 // AddNamespaceForSecondaryNetwork creates corresponding addressset in ovn db for secondary network
@@ -782,15 +828,15 @@ func (oc *BaseSecondaryNetworkController) allowPersistentIPs() bool {
 }
 
 func (oc *BaseSecondaryNetworkController) getNetworkID() (int, error) {
-	if oc.networkID == nil || *oc.networkID == util.InvalidNetworkID {
-		oc.networkID = ptr.To(util.InvalidNetworkID)
+	if oc.networkID == nil || *oc.networkID == util.InvalidID {
+		oc.networkID = ptr.To(util.InvalidID)
 		nodes, err := oc.watchFactory.GetNodes()
 		if err != nil {
-			return util.InvalidNetworkID, err
+			return util.InvalidID, err
 		}
 		*oc.networkID, err = util.GetNetworkID(nodes, oc.NetInfo)
 		if err != nil {
-			return util.InvalidNetworkID, err
+			return util.InvalidID, err
 		}
 	}
 	return *oc.networkID, nil
@@ -837,6 +883,83 @@ func (bsnc *BaseSecondaryNetworkController) buildUDNEgressSNAT(localPodSubnets [
 	return snats, nil
 }
 
+func (bsnc *BaseSecondaryNetworkController) ensureDHCP(pod *corev1.Pod, podAnnotation *util.PodAnnotation, lsp *nbdb.LogicalSwitchPort) error {
+	opts := []kubevirt.DHCPConfigsOpt{}
+
+	ipv4DNSServer, ipv6DNSServer, err := kubevirt.RetrieveDNSServiceClusterIPs(bsnc.watchFactory)
+	if err != nil {
+		return err
+	}
+
+	ipv4Gateway, _ := util.MatchFirstIPFamily(false /*ipv4*/, podAnnotation.Gateways)
+	if ipv4Gateway != nil {
+		opts = append(opts, kubevirt.WithIPv4Router(ipv4Gateway.String()))
+	}
+
+	if bsnc.MTU() > 0 {
+		opts = append(opts, kubevirt.WithIPv4MTU(bsnc.MTU()))
+	}
+
+	opts = append(opts, kubevirt.WithIPv4DNSServer(ipv4DNSServer), kubevirt.WithIPv6DNSServer(ipv6DNSServer))
+
+	return kubevirt.EnsureDHCPOptionsForLSP(bsnc.controllerName, bsnc.nbClient, pod, podAnnotation.IPs, lsp, opts...)
+}
+
 func getMasqueradeManagementIPSNATMatch(dstMac string) string {
 	return fmt.Sprintf("eth.dst == %s", dstMac)
+}
+
+func (bsnc *BaseSecondaryNetworkController) requireDHCP(pod *corev1.Pod) bool {
+	// Configure DHCP only for kubevirt VMs layer2 primary udn with subnets
+	return kubevirt.IsPodOwnedByVirtualMachine(pod) &&
+		util.IsNetworkSegmentationSupportEnabled() &&
+		bsnc.IsPrimaryNetwork() &&
+		bsnc.TopologyType() == types.Layer2Topology
+}
+
+func (bsnc *BaseSecondaryNetworkController) setPodLogicalSwitchPortEnabledField(
+	pod *corev1.Pod, nadName string, ops []ovsdb.Operation, enabled bool) ([]ovsdb.Operation, *nbdb.LogicalSwitchPort, error) {
+	lsp := &nbdb.LogicalSwitchPort{Name: bsnc.GetLogicalPortName(pod, nadName)}
+	lsp.Enabled = ptr.To(enabled)
+	switchName, err := bsnc.getExpectedSwitchName(pod)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to fetch switch name for pod %s: %w", pod.Name, err)
+	}
+	customFields := []libovsdbops.ModelUpdateField{libovsdbops.LogicalSwitchPortEnabled}
+	ops, err = libovsdbops.UpdateLogicalSwitchPortsOnSwitchWithCustomFieldsOps(bsnc.nbClient, ops, &nbdb.LogicalSwitch{Name: switchName}, customFields, lsp)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed updating logical switch port %+v on switch %s: %w", *lsp, switchName, err)
+	}
+	return ops, lsp, nil
+}
+
+func (bsnc *BaseSecondaryNetworkController) disableLiveMigrationSourceLSPOps(
+	kubevirtLiveMigrationStatus *kubevirt.LiveMigrationStatus,
+	nadName string, ops []ovsdb.Operation) ([]ovsdb.Operation, error) {
+	// closing the sourcePod lsp to ensure traffic goes to the now ready targetPod.
+	ops, _, err := bsnc.setPodLogicalSwitchPortEnabledField(kubevirtLiveMigrationStatus.SourcePod, nadName, ops, false)
+	return ops, err
+}
+
+func (bsnc *BaseSecondaryNetworkController) enableSourceLSPFailedLiveMigration(pod *corev1.Pod, nadName string) error {
+	kubevirtLiveMigrationStatus, err := kubevirt.DiscoverLiveMigrationStatus(bsnc.watchFactory, pod)
+	if err != nil {
+		return fmt.Errorf("failed to discover Live-migration status after pod termination: %w", err)
+	}
+	if kubevirtLiveMigrationStatus == nil ||
+		pod.Name != kubevirtLiveMigrationStatus.TargetPod.Name ||
+		kubevirtLiveMigrationStatus.State != kubevirt.LiveMigrationFailed {
+		return nil
+	}
+	// make sure sourcePod lsp is enabled if migration failed after DomainReady was set.
+	ops, sourcePodLsp, err := bsnc.setPodLogicalSwitchPortEnabledField(kubevirtLiveMigrationStatus.SourcePod, nadName, nil, true)
+	if err != nil {
+		return fmt.Errorf("failed to set source Pod lsp to enabled after migration failed: %w", err)
+	}
+	_, err = libovsdbops.TransactAndCheckAndSetUUIDs(bsnc.nbClient, sourcePodLsp, ops)
+	if err != nil {
+		return fmt.Errorf("failed transacting operations %+v: %w", ops, err)
+	}
+
+	return nil
 }

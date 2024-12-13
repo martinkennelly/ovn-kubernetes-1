@@ -40,10 +40,10 @@ func (c *openflowManager) getExGwBridgePortConfigurations() ([]bridgeUDNConfigur
 	return c.externalGatewayBridge.getBridgePortConfigurations()
 }
 
-func (c *openflowManager) addNetwork(nInfo util.NetInfo, masqCTMark uint, v4MasqIPs, v6MasqIPs *udn.MasqueradeIPs) {
-	c.defaultBridge.addNetworkBridgeConfig(nInfo, masqCTMark, v4MasqIPs, v6MasqIPs)
+func (c *openflowManager) addNetwork(nInfo util.NetInfo, masqCTMark, pktMark uint, v6MasqIPs, v4MasqIPs *udn.MasqueradeIPs) {
+	c.defaultBridge.addNetworkBridgeConfig(nInfo, masqCTMark, pktMark, v6MasqIPs, v4MasqIPs)
 	if c.externalGatewayBridge != nil {
-		c.externalGatewayBridge.addNetworkBridgeConfig(nInfo, masqCTMark, v4MasqIPs, v6MasqIPs)
+		c.externalGatewayBridge.addNetworkBridgeConfig(nInfo, masqCTMark, pktMark, v6MasqIPs, v4MasqIPs)
 	}
 }
 
@@ -55,7 +55,7 @@ func (c *openflowManager) delNetwork(nInfo util.NetInfo) {
 }
 
 func (c *openflowManager) getActiveNetwork(nInfo util.NetInfo) *bridgeUDNConfiguration {
-	return c.defaultBridge.getActiveNetworkBridgeConfig(nInfo)
+	return c.defaultBridge.getActiveNetworkBridgeConfig(nInfo.GetNetworkName())
 }
 
 // END UDN UTILs
@@ -254,9 +254,13 @@ func checkPorts(netConfigs []bridgeUDNConfiguration, physIntf, ofPortPhys string
 
 		}
 		if netConfig.ofPortPatch != curOfportPatch {
-			klog.Errorf("Fatal error: patch port %s ofport changed from %s to %s",
-				netConfig.patchPort, netConfig.ofPortPatch, curOfportPatch)
-			os.Exit(1)
+			if netConfig.isDefaultNetwork() || curOfportPatch != "" {
+				klog.Errorf("Fatal error: patch port %s ofport changed from %s to %s",
+					netConfig.patchPort, netConfig.ofPortPatch, curOfportPatch)
+				os.Exit(1)
+			} else {
+				klog.Warningf("Patch port %s removed for existing network", netConfig.patchPort)
+			}
 		}
 	}
 
