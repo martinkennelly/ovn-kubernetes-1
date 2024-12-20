@@ -845,7 +845,7 @@ func (npw *nodePortWatcher) AddService(service *kapi.Service) error {
 			service.Name, service.Namespace)
 		if err := addServiceRules(service, netInfo, sets.List(localEndpoints), hasLocalHostNetworkEp, npw); err != nil {
 			npw.getAndDeleteServiceInfo(name)
-			return fmt.Errorf("AddService failed for nodePortWatcher: %w, trying delete: %w", err, delServiceRules(service, sets.List(localEndpoints), npw))
+			return fmt.Errorf("AddService failed for nodePortWatcher: %w, trying delete: %v", err, delServiceRules(service, sets.List(localEndpoints), npw))
 		}
 	} else {
 		// Need to update flows here in case an attribute of the gateway has changed, such as MAC address
@@ -1118,10 +1118,14 @@ func (npw *nodePortWatcher) AddEndpointSlice(epSlice *discovery.EndpointSlice) e
 	// Here we make sure the correct rules are programmed whenever an AddEndpointSlice event is
 	// received, only alter flows if we need to, i.e if cache wasn't set or if it was and
 	// hasLocalHostNetworkEp or localEndpoints state (for LB svc where NPs=0) changed, to prevent flow churn
-	out, exists := npw.getAndSetServiceInfo(*svcNamespacedName, svc, hasLocalHostNetworkEp, localEndpoints)
+	out, exists := npw.getServiceInfo(*svcNamespacedName)
 	if !exists {
 		klog.V(5).Infof("Endpointslice %s ADD event in namespace %s is creating rules", epSlice.Name, epSlice.Namespace)
-		return addServiceRules(svc, netInfo, sets.List(localEndpoints), hasLocalHostNetworkEp, npw)
+		if err = addServiceRules(svc, netInfo, sets.List(localEndpoints), hasLocalHostNetworkEp, npw); err != nil {
+			return err
+		}
+		npw.addOrSetServiceInfo(*svcNamespacedName, svc, hasLocalHostNetworkEp, localEndpoints)
+		return nil
 	}
 
 	if out.hasLocalHostNetworkEp != hasLocalHostNetworkEp ||
@@ -1132,6 +1136,8 @@ func (npw *nodePortWatcher) AddEndpointSlice(epSlice *discovery.EndpointSlice) e
 		}
 		if err = addServiceRules(svc, netInfo, sets.List(localEndpoints), hasLocalHostNetworkEp, npw); err != nil {
 			errors = append(errors, err)
+		} else {
+			npw.updateServiceInfo(*svcNamespacedName, svc, &hasLocalHostNetworkEp, localEndpoints)
 		}
 		return utilerrors.Join(errors...)
 	}
@@ -1982,23 +1988,34 @@ func commonFlows(subnets []*net.IPNet, bridge *bridgeConfiguration, isPodNetwork
 	if ofPortPhys != "" {
 		if config.Gateway.DisableSNATMultipleGWs || isPodNetworkAdvertised {
 			// table 1, traffic to pod subnet go directly to OVN
+			output := defaultNetConfig.ofPortPatch
+			if isPodNetworkAdvertised && config.Gateway.Mode == config.GatewayModeLocal {
+				// except if advertised through BGP, go to kernel
+				// TODO: MEG enabled pods should still go through the patch port
+				// but holding this until
+				// https://issues.redhat.com/browse/FDP-646 is fixed, for now we
+				// are assuming MEG & BGP are not used together
+				output = ovsLocalPort
+			}
 			for _, clusterEntry := range config.Default.ClusterSubnets {
 				cidr := clusterEntry.CIDR
 				ipv := getIPv(cidr)
 				dftFlows = append(dftFlows,
 					fmt.Sprintf("cookie=%s, priority=15, table=1, %s, %s_dst=%s, "+
 						"actions=output:%s",
-						defaultOpenFlowCookie, ipv, ipv, cidr, defaultNetConfig.ofPortPatch))
+						defaultOpenFlowCookie, ipv, ipv, cidr, output))
 			}
-			// except node management traffic
-			for _, subnet := range subnets {
-				mgmtIP := util.GetNodeManagementIfAddr(subnet)
-				ipv := getIPv(mgmtIP)
-				dftFlows = append(dftFlows,
-					fmt.Sprintf("cookie=%s, priority=16, table=1, %s, %s_dst=%s, "+
-						"actions=output:%s",
-						defaultOpenFlowCookie, ipv, ipv, mgmtIP.IP, ovsLocalPort),
-				)
+			if output == defaultNetConfig.ofPortPatch {
+				// except node management traffic
+				for _, subnet := range subnets {
+					mgmtIP := util.GetNodeManagementIfAddr(subnet)
+					ipv := getIPv(mgmtIP)
+					dftFlows = append(dftFlows,
+						fmt.Sprintf("cookie=%s, priority=16, table=1, %s, %s_dst=%s, "+
+							"actions=output:%s",
+							defaultOpenFlowCookie, ipv, ipv, mgmtIP.IP, ovsLocalPort),
+					)
+				}
 			}
 		}
 
@@ -2040,6 +2057,16 @@ func commonFlows(subnets []*net.IPNet, bridge *bridgeConfiguration, isPodNetwork
 			dftFlows = append(dftFlows,
 				fmt.Sprintf("cookie=%s, priority=10, table=11, reg0=0x1, "+
 					"actions=output:%s", defaultOpenFlowCookie, ofPortHost))
+
+			// Send UDN destined traffic to right patch port
+			for _, netConfig := range bridge.patchedNetConfigs() {
+				if netConfig.masqCTMark != ctMarkOVN {
+					dftFlows = append(dftFlows,
+						fmt.Sprintf("cookie=%s, priority=5, table=11, ct_mark=%s, "+
+							"actions=output:%s", defaultOpenFlowCookie, netConfig.masqCTMark, netConfig.ofPortPatch))
+				}
+			}
+
 			dftFlows = append(dftFlows,
 				fmt.Sprintf("cookie=%s, priority=1, table=11, "+
 					"actions=output:%s", defaultOpenFlowCookie, defaultNetConfig.ofPortPatch))
