@@ -112,6 +112,8 @@ type DefaultNetworkController struct {
 	retryEgressIPPods *retry.RetryFramework
 	// retry framework for Egress nodes
 	retryEgressNodes *retry.RetryFramework
+	// retry framework for egress IP traffic
+	retryEgressIPTraffics *retry.RetryFramework
 	// retry framework for Egress Firewall Nodes
 	retryEgressFwNodes *retry.RetryFramework
 
@@ -147,10 +149,10 @@ func NewDefaultNetworkController(cnci *CommonNetworkControllerInfo) (*DefaultNet
 
 func newDefaultNetworkControllerCommon(cnci *CommonNetworkControllerInfo,
 	defaultStopChan chan struct{}, defaultWg *sync.WaitGroup,
-	addressSetFactory addressset.AddressSetFactory) (*DefaultNetworkController, error) {
+	addressSetFactoryIPs addressset.AddressSetFactoryIPs) (*DefaultNetworkController, error) {
 
-	if addressSetFactory == nil {
-		addressSetFactory = addressset.NewOvnAddressSetFactory(cnci.nbClient, config.IPv4Mode, config.IPv6Mode)
+	if addressSetFactoryIPs == nil {
+		addressSetFactoryIPs = addressset.NewOvnAddressSetFactoryForIPs(cnci.nbClient, config.IPv4Mode, config.IPv6Mode)
 	}
 
 	svcController, err := svccontroller.NewController(
@@ -178,7 +180,7 @@ func newDefaultNetworkControllerCommon(cnci *CommonNetworkControllerInfo,
 		cnci.watchFactory.APBRouteInformer(),
 		cnci.watchFactory.NodeCoreInformer().Lister(),
 		cnci.nbClient,
-		addressSetFactory,
+		addressSetFactoryIPs,
 		DefaultNetworkControllerName,
 		cnci.zone,
 	)
@@ -195,7 +197,7 @@ func newDefaultNetworkControllerCommon(cnci *CommonNetworkControllerInfo,
 			logicalPortCache:            newPortCache(defaultStopChan),
 			namespaces:                  make(map[string]*namespaceInfo),
 			namespacesMutex:             sync.Mutex{},
-			addressSetFactory:           addressSetFactory,
+			addressSetFactoryIPs:        addressSetFactoryIPs,
 			networkPolicies:             syncmap.NewSyncMap[*networkPolicy](),
 			sharedNetpolPortGroups:      syncmap.NewSyncMap[*defaultDenyPortGroups](),
 			podSelectorAddressSets:      syncmap.NewSyncMap[*PodSelectorAddressSet](),
@@ -229,7 +231,9 @@ func newDefaultNetworkControllerCommon(cnci *CommonNetworkControllerInfo,
 	if err != nil {
 		return nil, fmt.Errorf("failed to allocate join switch IP address connected to %s: %v", ovntypes.OVNClusterRouter, err)
 	}
-
+	if config.OVNKubernetesFeature.EnableEgressIP {
+		oc.eipDstNetworks = syncmap.NewSyncMap[string]()
+	}
 	oc.ovnClusterLRPToJoinIfAddrs = gwLRPIfAddrs
 
 	oc.initRetryFramework()
@@ -246,6 +250,7 @@ func (oc *DefaultNetworkController) initRetryFramework() {
 	oc.retryEgressIPNamespaces = oc.newRetryFramework(factory.EgressIPNamespaceType)
 	oc.retryEgressIPPods = oc.newRetryFramework(factory.EgressIPPodType)
 	oc.retryEgressNodes = oc.newRetryFramework(factory.EgressNodeType)
+	oc.retryEgressIPTraffics = oc.newRetryFramework(factory.EgressIPTrafficType)
 	oc.retryEgressFwNodes = oc.newRetryFramework(factory.EgressFwNodeType)
 	oc.retryNamespaces = oc.newRetryFramework(factory.NamespaceType)
 	oc.retryNetworkPolicies = oc.newRetryFramework(factory.PolicyType)
@@ -483,6 +488,9 @@ func (oc *DefaultNetworkController) Run(ctx context.Context) error {
 		if err := WithSyncDurationMetric("egress node", oc.WatchEgressNodes); err != nil {
 			return err
 		}
+		if err := WithSyncDurationMetric("egress ip traffic", oc.WatchEgressIPTraffics); err != nil {
+			return err
+		}
 		if err := WithSyncDurationMetric("egress ip", oc.WatchEgressIP); err != nil {
 			return err
 		}
@@ -490,7 +498,7 @@ func (oc *DefaultNetworkController) Run(ctx context.Context) error {
 
 	if config.OVNKubernetesFeature.EnableEgressFirewall {
 		var err error
-		oc.egressFirewallDNS, err = NewEgressDNS(oc.addressSetFactory, oc.controllerName, oc.stopChan)
+		oc.egressFirewallDNS, err = NewEgressDNS(oc.addressSetFactoryIPs, oc.controllerName, oc.stopChan)
 		if err != nil {
 			return err
 		}
@@ -798,15 +806,23 @@ func (h *defaultNetworkControllerEventHandler) AddResource(obj interface{}, from
 
 	case factory.EgressIPType:
 		eIP := obj.(*egressipv1.EgressIP)
+		klog.Infof("MARTIN: add EIP event")
 		return h.oc.reconcileEgressIP(nil, eIP)
 
 	case factory.EgressIPNamespaceType:
 		namespace := obj.(*kapi.Namespace)
+		klog.Infof("MARTIN: add EIP NS event")
 		return h.oc.reconcileEgressIPNamespace(nil, namespace)
 
 	case factory.EgressIPPodType:
 		pod := obj.(*kapi.Pod)
+		klog.Infof("MARTIN: add EIP pod event")
 		return h.oc.reconcileEgressIPPod(nil, pod)
+
+	case factory.EgressIPTrafficType:
+		eIPTraffic := obj.(*egressipv1.EgressIPTraffic)
+		klog.Infof("MARTIN: add EIPTraffic event")
+		return h.oc.reconcileEgressIPTraffic(nil, eIPTraffic)
 
 	case factory.EgressNodeType:
 		node := obj.(*kapi.Node)
@@ -970,17 +986,26 @@ func (h *defaultNetworkControllerEventHandler) UpdateResource(oldObj, newObj int
 	case factory.EgressIPType:
 		oldEIP := oldObj.(*egressipv1.EgressIP)
 		newEIP := newObj.(*egressipv1.EgressIP)
+		klog.Infof("MARTIN: update EIP event")
 		return h.oc.reconcileEgressIP(oldEIP, newEIP)
 
 	case factory.EgressIPNamespaceType:
+		klog.Infof("MARTIN: update EIP NS event")
 		oldNamespace := oldObj.(*kapi.Namespace)
 		newNamespace := newObj.(*kapi.Namespace)
 		return h.oc.reconcileEgressIPNamespace(oldNamespace, newNamespace)
 
 	case factory.EgressIPPodType:
+		klog.Infof("MARTIN: update EIP pod event")
 		oldPod := oldObj.(*kapi.Pod)
 		newPod := newObj.(*kapi.Pod)
 		return h.oc.reconcileEgressIPPod(oldPod, newPod)
+
+	case factory.EgressIPTrafficType:
+		klog.Infof("MARTIN: update EIPTraffic event")
+		oldEIPTraffic := oldObj.(*egressipv1.EgressIPTraffic)
+		newEIPTraffic := newObj.(*egressipv1.EgressIPTraffic)
+		return h.oc.reconcileEgressIPTraffic(oldEIPTraffic, newEIPTraffic)
 
 	case factory.EgressNodeType:
 		oldNode := oldObj.(*kapi.Node)
@@ -1061,6 +1086,10 @@ func (h *defaultNetworkControllerEventHandler) DeleteResource(obj, cachedObj int
 		pod := obj.(*kapi.Pod)
 		return h.oc.reconcileEgressIPPod(pod, nil)
 
+	case factory.EgressIPTrafficType:
+		eIPTraffic := obj.(*egressipv1.EgressIPTraffic)
+		return h.oc.reconcileEgressIPTraffic(eIPTraffic, nil)
+
 	case factory.EgressNodeType:
 		node := obj.(*kapi.Node)
 		// remove the GARP setup for the node
@@ -1124,7 +1153,8 @@ func (h *defaultNetworkControllerEventHandler) SyncFunc(objs []interface{}) erro
 			syncFunc = nil
 
 		case factory.EgressIPPodType,
-			factory.EgressIPType:
+			factory.EgressIPType,
+			factory.EgressIPTrafficType:
 			syncFunc = nil
 
 		case factory.NamespaceType:

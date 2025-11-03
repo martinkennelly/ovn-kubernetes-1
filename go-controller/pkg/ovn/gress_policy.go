@@ -264,7 +264,7 @@ func (gp *gressPolicy) getMatchFromIPBlock(lportMatch, l4Match string) []string 
 // If the address set is not found in the db, return error.
 // If the address set is already added for this policy, return false, otherwise returns true.
 // This function is safe for concurrent use, doesn't require additional synchronization
-func (gp *gressPolicy) addNamespaceAddressSet(name string, asf addressset.AddressSetFactory) (bool, error) {
+func (gp *gressPolicy) addNamespaceAddressSet(name string, asf addressset.AddressSetFactoryIPs) (bool, error) {
 	dbIDs := getNamespaceAddrSetDbIDs(name, gp.controllerName)
 	as, err := asf.GetAddressSet(dbIDs)
 	if err != nil {

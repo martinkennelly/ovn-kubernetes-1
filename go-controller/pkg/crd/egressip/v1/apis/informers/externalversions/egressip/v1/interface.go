@@ -25,6 +25,8 @@ import (
 type Interface interface {
 	// EgressIPs returns a EgressIPInformer.
 	EgressIPs() EgressIPInformer
+	// EgressIPTraffics returns a EgressIPTrafficInformer.
+	EgressIPTraffics() EgressIPTrafficInformer
 }
 
 type version struct {
@@ -41,4 +43,9 @@ func New(f internalinterfaces.SharedInformerFactory, namespace string, tweakList
 // EgressIPs returns a EgressIPInformer.
 func (v *version) EgressIPs() EgressIPInformer {
 	return &egressIPInformer{factory: v.factory, tweakListOptions: v.tweakListOptions}
+}
+
+// EgressIPTraffics returns a EgressIPTrafficInformer.
+func (v *version) EgressIPTraffics() EgressIPTrafficInformer {
+	return &egressIPTrafficInformer{factory: v.factory, tweakListOptions: v.tweakListOptions}
 }

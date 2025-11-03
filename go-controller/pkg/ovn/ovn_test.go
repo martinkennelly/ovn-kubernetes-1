@@ -58,7 +58,7 @@ const (
 
 type secondaryControllerInfo struct {
 	bnc *BaseSecondaryNetworkController
-	asf *addressset.FakeAddressSetFactory
+	asf *addressset.FakeAddressSetFactoryForIPs
 }
 
 type FakeOVN struct {
@@ -67,7 +67,7 @@ type FakeOVN struct {
 	controller   *DefaultNetworkController
 	stopChan     chan struct{}
 	wg           *sync.WaitGroup
-	asf          *addressset.FakeAddressSetFactory
+	asfIPs       *addressset.FakeAddressSetFactoryForIPs
 	fakeRecorder *record.FakeRecorder
 	nbClient     libovsdbclient.Client
 	sbClient     libovsdbclient.Client
@@ -81,14 +81,14 @@ type FakeOVN struct {
 	secondaryControllers map[string]secondaryControllerInfo
 }
 
-// NOTE: the FakeAddressSetFactory is no longer needed and should no longer be used. starting to phase out FakeAddressSetFactory
+// NOTE: the FakeAddressSetFactoryForIPs is no longer needed and should no longer be used. starting to phase out FakeAddressSetFactoryForIPs
 func NewFakeOVN(useFakeAddressSet bool) *FakeOVN {
-	var asf *addressset.FakeAddressSetFactory
+	var asfIPs *addressset.FakeAddressSetFactoryForIPs
 	if useFakeAddressSet {
-		asf = addressset.NewFakeAddressSetFactory(DefaultNetworkControllerName)
+		asfIPs = addressset.NewFakeAddressSetFactoryForIPs(DefaultNetworkControllerName)
 	}
 	return &FakeOVN{
-		asf:          asf,
+		asfIPs:       asfIPs,
 		fakeRecorder: record.NewFakeRecorder(10),
 		egressQoSWg:  &sync.WaitGroup{},
 		egressSVCWg:  &sync.WaitGroup{},
@@ -102,7 +102,7 @@ func (o *FakeOVN) start(objects ...runtime.Object) {
 	fexec := ovntest.NewFakeExec()
 	err := util.SetExec(fexec)
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
-
+	// EIP+EIPTraffic Objs
 	egressIPObjects := []runtime.Object{}
 	egressFirewallObjects := []runtime.Object{}
 	egressQoSObjects := []runtime.Object{}
@@ -115,6 +115,8 @@ func (o *FakeOVN) start(objects ...runtime.Object) {
 	for _, object := range objects {
 		switch o := object.(type) {
 		case *egressip.EgressIPList:
+			egressIPObjects = append(egressIPObjects, object)
+		case *egressip.EgressIPTrafficList:
 			egressIPObjects = append(egressIPObjects, object)
 		case *egressfirewall.EgressFirewallList:
 			egressFirewallObjects = append(egressFirewallObjects, object)
@@ -179,7 +181,7 @@ func (o *FakeOVN) init(nadList []nettypes.NetworkAttachmentDefinition) {
 	o.stopChan = make(chan struct{})
 	o.wg = &sync.WaitGroup{}
 	o.controller, err = NewOvnController(o.fakeClient, o.watcher,
-		o.stopChan, o.asf,
+		o.stopChan, o.asfIPs,
 		o.nbClient, o.sbClient,
 		o.fakeRecorder, o.wg)
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
@@ -253,12 +255,12 @@ func resetNBClient(ctx context.Context, nbClient libovsdbclient.Client) {
 // NewOvnController creates a new OVN controller for creating logical network
 // infrastructure and policy
 func NewOvnController(ovnClient *util.OVNMasterClientset, wf *factory.WatchFactory, stopChan chan struct{},
-	addressSetFactory addressset.AddressSetFactory, libovsdbOvnNBClient libovsdbclient.Client,
+	addressSetFactoryIPs addressset.AddressSetFactoryIPs, libovsdbOvnNBClient libovsdbclient.Client,
 	libovsdbOvnSBClient libovsdbclient.Client, recorder record.EventRecorder, wg *sync.WaitGroup) (*DefaultNetworkController, error) {
 
-	fakeAddr, ok := addressSetFactory.(*addressset.FakeAddressSetFactory)
-	if addressSetFactory == nil || (ok && fakeAddr == nil) {
-		addressSetFactory = addressset.NewOvnAddressSetFactory(libovsdbOvnNBClient, config.IPv4Mode, config.IPv6Mode)
+	fakeAddrIPs, ok := addressSetFactoryIPs.(*addressset.FakeAddressSetFactoryForIPs)
+	if addressSetFactoryIPs == nil || (ok && fakeAddrIPs == nil) {
+		addressSetFactoryIPs = addressset.NewOvnAddressSetFactoryForIPs(libovsdbOvnNBClient, config.IPv4Mode, config.IPv6Mode)
 	}
 
 	podRecorder := metrics.NewPodRecorder()
@@ -296,7 +298,7 @@ func NewOvnController(ovnClient *util.OVNMasterClientset, wf *factory.WatchFacto
 		return nil, err
 	}
 
-	dnc, err := newDefaultNetworkControllerCommon(cnci, stopChan, wg, addressSetFactory)
+	dnc, err := newDefaultNetworkControllerCommon(cnci, stopChan, wg, addressSetFactoryIPs)
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 	if nbZoneFailed {
@@ -410,20 +412,20 @@ func (o *FakeOVN) NewSecondaryNetworkController(netattachdef *nettypes.NetworkAt
 		if err != nil {
 			return err
 		}
-		asf := addressset.NewFakeAddressSetFactory(netName + "-network-controller")
+		asf := addressset.NewFakeAddressSetFactoryForIPs(netName + "-network-controller")
 
 		switch topoType {
 		case types.Layer3Topology:
 			l3Controller := NewSecondaryLayer3NetworkController(cnci, nInfo)
-			l3Controller.addressSetFactory = asf
+			l3Controller.addressSetFactoryIPs = asf
 			secondaryController = &l3Controller.BaseSecondaryNetworkController
 		case types.Layer2Topology:
 			l2Controller := NewSecondaryLayer2NetworkController(cnci, nInfo)
-			l2Controller.addressSetFactory = asf
+			l2Controller.addressSetFactoryIPs = asf
 			secondaryController = &l2Controller.BaseSecondaryNetworkController
 		case types.LocalnetTopology:
 			localnetController := NewSecondaryLocalnetNetworkController(cnci, nInfo)
-			localnetController.addressSetFactory = asf
+			localnetController.addressSetFactoryIPs = asf
 			secondaryController = &localnetController.BaseSecondaryNetworkController
 		default:
 			return fmt.Errorf("topoloty type %s not supported", topoType)
@@ -446,7 +448,7 @@ func (o *FakeOVN) NewSecondaryNetworkController(netattachdef *nettypes.NetworkAt
 	return nil
 }
 
-func (o *FakeOVN) patchEgressIPObj(nodeName, egressIPName, egressIP, network string) {
+func (o *FakeOVN) patchEgressIPObjStatus(nodeName, egressIPName, egressIP, network string) {
 	// NOTE: Cluster manager is the one who patches the egressIP object.
 	// For the sake of unit testing egressip zone controller we need to patch egressIP object manually
 	// There are tests in cluster-manager package covering the patch logic.

@@ -44,7 +44,7 @@ type northBoundClient struct {
 	nbClient libovsdbclient.Client
 
 	// An address set factory that creates address sets
-	addressSetFactory        addressset.AddressSetFactory
+	addressSetFactory        addressset.AddressSetFactoryIPs
 	externalGatewayRouteInfo *ExternalGatewayRouteInfoCache
 
 	controllerName string
@@ -651,13 +651,13 @@ func buildPodSNAT(extIPs, podIPNets []*net.IPNet) ([]*nbdb.NAT, error) {
 	for _, podIPNet := range podIPNets {
 		fullMaskPodNet := util.IPsToNetworkIPs(podIPNet)[0]
 		if len(extIPs) == 0 {
-			nat = libovsdbops.BuildSNAT(nil, fullMaskPodNet, "", nil)
+			nat = libovsdbops.BuildSNAT(nil, fullMaskPodNet, "", nil, "")
 		} else {
 			for _, gwIPNet := range extIPs {
 				if utilnet.IsIPv6CIDR(gwIPNet) != utilnet.IsIPv6CIDR(podIPNet) {
 					continue
 				}
-				nat = libovsdbops.BuildSNAT(&gwIPNet.IP, fullMaskPodNet, "", nil)
+				nat = libovsdbops.BuildSNAT(&gwIPNet.IP, fullMaskPodNet, "", nil, "")
 			}
 		}
 		nats = append(nats, nat)

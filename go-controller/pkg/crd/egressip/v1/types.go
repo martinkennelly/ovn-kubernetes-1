@@ -48,6 +48,10 @@ type EgressIPSpec struct {
 	// EgressIPs is the list of egress IP addresses requested. Can be IPv4 and/or IPv6.
 	// This field is mandatory.
 	EgressIPs []string `json:"egressIPs"`
+	// TrafficSelector applies the egress IP only to the network traffic defined within the selected EgressIPTraffic.
+	// If not set, all egress traffic is selected.
+	// +optional
+	TrafficSelector metav1.LabelSelector `json:"trafficSelector"`
 	// NamespaceSelector applies the egress IP only to the namespace(s) whose label
 	// matches this definition. This field is mandatory.
 	NamespaceSelector metav1.LabelSelector `json:"namespaceSelector"`
@@ -71,4 +75,46 @@ type EgressIPList struct {
 
 	// List of EgressIP.
 	Items []EgressIP `json:"items"`
+}
+
+// +genclient
+// +genclient:nonNamespaced
+// +kubebuilder:object:root=true
+// +kubebuilder:subresource:nostatus
+// +kubebuilder:resource:shortName=eipd,scope=Cluster
+// +kubebuilder:printcolumn:name="DestinationNetworks",type=string,JSONPath=".spec.destinationNetworks"
+// +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+// EgressIPTraffic defines a set of networks outside the cluster network.
+type EgressIPTraffic struct {
+	metav1.TypeMeta   `json:",inline"`
+	metav1.ObjectMeta `json:"metadata"`
+
+	Spec EgressIPTrafficSpec `json:"spec"`
+}
+
+// EgressIPTrafficSpec defines the desired state description of EgressIPTraffic.
+// +kubebuilder:validation:MaxProperties=1
+// +kubebuilder:validation:MinProperties=1
+type EgressIPTrafficSpec struct {
+	// DestinationNetworks is the list of Network CIDRs that defines external destinations
+	// for IPv4 or IPv6. Mixing IP families is not allowed.
+	// +optional
+	// +kubebuilder:validation:MinItems=1
+	DestinationNetworks []CIDR `json:"destinationNetworks,omitempty" validate:"omitempty,dive,cidr"`
+}
+
+// CIDR is a string that contains a valid (parsed by GoLang net.ParseCIDR) network CIDR
+// Length 48 is taken from: https://elixir.bootlin.com/linux/latest/source/include/linux/inet.h#L50
+// #### TODO(mk): provide support for isCIDR: +kubebuilder:validation:XValidation:rule="isCIDR(self)",message="Invalid CIDR provided"
+type CIDR string
+
+// +kubebuilder:object:root=true
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+// EgressIPTrafficList contains a list of EgressIPTraffic
+type EgressIPTrafficList struct {
+	metav1.TypeMeta `json:",inline"`
+	metav1.ListMeta `json:"metadata,omitempty"`
+
+	Items []EgressIPTraffic `json:"items"`
 }

@@ -28,6 +28,7 @@ import (
 type K8sV1Interface interface {
 	RESTClient() rest.Interface
 	EgressIPsGetter
+	EgressIPTrafficsGetter
 }
 
 // K8sV1Client is used to interact with features provided by the k8s.ovn.org group.
@@ -37,6 +38,10 @@ type K8sV1Client struct {
 
 func (c *K8sV1Client) EgressIPs() EgressIPInterface {
 	return newEgressIPs(c)
+}
+
+func (c *K8sV1Client) EgressIPTraffics() EgressIPTrafficInterface {
+	return newEgressIPTraffics(c)
 }
 
 // NewForConfig creates a new K8sV1Client for the given config.

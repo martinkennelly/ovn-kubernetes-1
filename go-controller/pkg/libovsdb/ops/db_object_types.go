@@ -22,14 +22,15 @@ const (
 	PodSelectorOwnerType   ownerType = "PodSelector"
 	NamespaceOwnerType     ownerType = "Namespace"
 	// HybridNodeRouteOwnerType is transferred from egressgw to apbRoute controller with the same dbIDs
-	HybridNodeRouteOwnerType    ownerType = "HybridNodeRoute"
-	EgressIPOwnerType           ownerType = "EgressIP"
-	EgressServiceOwnerType      ownerType = "EgressService"
-	MulticastNamespaceOwnerType ownerType = "MulticastNS"
-	MulticastClusterOwnerType   ownerType = "MulticastCluster"
-	NetpolNodeOwnerType         ownerType = "NetpolNode"
-	NetpolNamespaceOwnerType    ownerType = "NetpolNamespace"
-	VirtualMachineOwnerType     ownerType = "VirtualMachine"
+	HybridNodeRouteOwnerType     ownerType = "HybridNodeRoute"
+	EgressIPOwnerType            ownerType = "EgressIP"
+	EgressIPDstNetworksOwnerType ownerType = "EgressIPDstNetworks"
+	EgressServiceOwnerType       ownerType = "EgressService"
+	MulticastNamespaceOwnerType  ownerType = "MulticastNS"
+	MulticastClusterOwnerType    ownerType = "MulticastCluster"
+	NetpolNodeOwnerType          ownerType = "NetpolNode"
+	NetpolNamespaceOwnerType     ownerType = "NetpolNamespace"
+	VirtualMachineOwnerType      ownerType = "VirtualMachine"
 	// NetworkPolicyPortIndexOwnerType is the old version of NetworkPolicyOwnerType, kept for sync only
 	NetworkPolicyPortIndexOwnerType ownerType = "NetworkPolicyPortIndexOwnerType"
 	// owner extra IDs, make sure to define only 1 ExternalIDKey for every string value
@@ -115,6 +116,10 @@ var AddressSetEgressIP = newObjectIDsType(addressSet, EgressIPOwnerType, []Exter
 	// cluster-wide address set name
 	ObjectNameKey,
 	AddressSetIPFamilyKey,
+})
+
+var AddressSetEgressIPDstNetworks = newObjectIDsType(addressSet, EgressIPDstNetworksOwnerType, []ExternalIDKey{
+	ObjectNameKey,
 })
 
 var AddressSetEgressService = newObjectIDsType(addressSet, EgressServiceOwnerType, []ExternalIDKey{

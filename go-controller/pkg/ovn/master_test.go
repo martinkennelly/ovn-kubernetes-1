@@ -1256,8 +1256,8 @@ var _ = ginkgo.Describe("Default network controller operations", func() {
 
 			expectedNBDatabaseState = append(expectedNBDatabaseState,
 				newNodeSNAT("stale-nodeNAT-UUID-3", "10.0.0.3", externalIP.String()), // won't be deleted since pod exists on this node
-				newNodeSNAT("stale-nodeNAT-UUID-4", "10.0.0.3", "172.16.16.3"))       // won't be deleted on this node but will be deleted on the node whose IP is 172.16.16.3 since this pod belongs to this node
-			newNodeSNAT("nat-join-0-UUID", node1.LrpIP, externalIP.String()) // join subnet SNAT won't be affected by sync
+				newNodeSNAT("stale-nodeNAT-UUID-4", "10.0.0.3", "172.16.16.3")) // won't be deleted on this node but will be deleted on the node whose IP is 172.16.16.3 since this pod belongs to this node
+			newNodeSNAT("nat-join-0-UUID", node1.LrpIP, externalIP.String())    // join subnet SNAT won't be affected by sync
 			for _, testObj := range expectedNBDatabaseState {
 				uuid := reflect.ValueOf(testObj).Elem().FieldByName("UUID").Interface().(string)
 				if uuid == types.GWRouterPrefix+node1.Name+"-UUID" {
@@ -1733,7 +1733,7 @@ var _ = ginkgo.Describe("Default network controller operations", func() {
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 			// Check whether the address_set is empty after HostNetworkNamespace addition
-			fakeOvn.asf.EventuallyExpectEmptyAddressSetExist(config.Kubernetes.HostNetworkNamespace)
+			fakeOvn.asfIPs.EventuallyExpectEmptyAddressSetExist(config.Kubernetes.HostNetworkNamespace)
 
 			// Set annotations required to create remote zone node
 			newNodeSubnet := "10.1.2.0/24"
@@ -1757,14 +1757,14 @@ var _ = ginkgo.Describe("Default network controller operations", func() {
 			lrpip, _, _ := net.ParseCIDR(lrpips[0].String())
 			ips = append(ips, lrpip.String())
 
-			fakeOvn.asf.EventuallyExpectAddressSetWithIPs(config.Kubernetes.HostNetworkNamespace, ips)
+			fakeOvn.asfIPs.EventuallyExpectAddressSetWithIPs(config.Kubernetes.HostNetworkNamespace, ips)
 
 			// Delete the node and check whether the address_set is empty or not
 			err = fakeOvn.fakeClient.KubeClient.CoreV1().Nodes().Delete(context.TODO(), testNode.Name, metav1.DeleteOptions{})
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 			var emptyAddress []string
-			fakeOvn.asf.EventuallyExpectAddressSetWithIPs(config.Kubernetes.HostNetworkNamespace, emptyAddress)
+			fakeOvn.asfIPs.EventuallyExpectAddressSetWithIPs(config.Kubernetes.HostNetworkNamespace, emptyAddress)
 
 			return nil
 		}

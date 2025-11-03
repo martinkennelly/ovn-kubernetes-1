@@ -34,7 +34,7 @@ type namespaceInfo struct {
 
 	// addressSet is an address set object that holds the IP addresses
 	// of all pods in the namespace.
-	addressSet addressset.AddressSet
+	addressSet addressset.AddressSetIPs
 	// portGroupName is a name of a port group, that stores all local zone ports for a given namespace.
 	// May be empty if the port group wasn't created.
 	portGroupName string
@@ -166,10 +166,10 @@ func (bnc *BaseNetworkController) syncNamespaces(namespaces []interface{}) error
 		}
 	}
 
-	err := bnc.addressSetFactory.ProcessEachAddressSet(bnc.controllerName, libovsdbops.AddressSetNamespace,
+	err := bnc.addressSetFactoryIPs.ProcessEachAddressSet(bnc.controllerName, libovsdbops.AddressSetNamespace,
 		func(dbIDs *libovsdbops.DbObjectIDs) error {
 			if !expectedNs[dbIDs.GetObjectID(libovsdbops.ObjectNameKey)] {
-				if err := bnc.addressSetFactory.DestroyAddressSet(dbIDs); err != nil {
+				if err := bnc.addressSetFactoryIPs.DestroyAddressSet(dbIDs); err != nil {
 					klog.Errorf(err.Error())
 					return err
 				}
@@ -429,9 +429,9 @@ func (bnc *BaseNetworkController) getAllNamespacePodAddresses(ns string) []net.I
 	return ips
 }
 
-func (bnc *BaseNetworkController) createNamespaceAddrSetAllPods(ns string, ips []net.IP) (addressset.AddressSet, error) {
+func (bnc *BaseNetworkController) createNamespaceAddrSetAllPods(ns string, ips []net.IP) (addressset.AddressSetIPs, error) {
 	dbIDs := getNamespaceAddrSetDbIDs(ns, bnc.controllerName)
-	return bnc.addressSetFactory.NewAddressSet(dbIDs, ips)
+	return bnc.addressSetFactoryIPs.NewAddressSet(dbIDs, ips)
 }
 
 // createNamespacePortGroup should only create a port group if doesn't exist already,

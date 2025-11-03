@@ -20,3 +20,7 @@ package v1
 // EgressIPListerExpansion allows custom methods to be added to
 // EgressIPLister.
 type EgressIPListerExpansion interface{}
+
+// EgressIPTrafficListerExpansion allows custom methods to be added to
+// EgressIPTrafficLister.
+type EgressIPTrafficListerExpansion interface{}

@@ -25,6 +25,7 @@ import (
 // with apply.
 type EgressIPSpecApplyConfiguration struct {
 	EgressIPs         []string          `json:"egressIPs,omitempty"`
+	TrafficSelector   *v1.LabelSelector `json:"trafficSelector,omitempty"`
 	NamespaceSelector *v1.LabelSelector `json:"namespaceSelector,omitempty"`
 	PodSelector       *v1.LabelSelector `json:"podSelector,omitempty"`
 }
@@ -42,6 +43,14 @@ func (b *EgressIPSpecApplyConfiguration) WithEgressIPs(values ...string) *Egress
 	for i := range values {
 		b.EgressIPs = append(b.EgressIPs, values[i])
 	}
+	return b
+}
+
+// WithTrafficSelector sets the TrafficSelector field in the declarative configuration to the given value
+// and returns the receiver, so that objects can be built by chaining "With" function invocations.
+// If called multiple times, the TrafficSelector field is set to the value of the last call.
+func (b *EgressIPSpecApplyConfiguration) WithTrafficSelector(value v1.LabelSelector) *EgressIPSpecApplyConfiguration {
+	b.TrafficSelector = &value
 	return b
 }
 

@@ -870,6 +870,7 @@ func buildNAT(
 	logicalPort string,
 	externalMac string,
 	externalIDs map[string]string,
+	allowedExtIPs string,
 ) *nbdb.NAT {
 	nat := &nbdb.NAT{
 		Type:        natType,
@@ -887,6 +888,10 @@ func buildNAT(
 		nat.ExternalMAC = &externalMac
 	}
 
+	if allowedExtIPs != "" {
+		nat.AllowedExtIPs = &allowedExtIPs
+	}
+
 	return nat
 }
 
@@ -896,6 +901,7 @@ func BuildSNAT(
 	logicalIP *net.IPNet,
 	logicalPort string,
 	externalIDs map[string]string,
+	allowedExtIPs string, //TODO: rename
 ) *nbdb.NAT {
 	externalIPStr := ""
 	if externalIP != nil {
@@ -907,7 +913,7 @@ func BuildSNAT(
 	if logicalIPMask != 32 && logicalIPMask != 128 {
 		logicalIPStr = logicalIP.String()
 	}
-	return buildNAT(nbdb.NATTypeSNAT, externalIPStr, logicalIPStr, logicalPort, "", externalIDs)
+	return buildNAT(nbdb.NATTypeSNAT, externalIPStr, logicalIPStr, logicalPort, "", externalIDs, allowedExtIPs)
 }
 
 // BuildDNATAndSNAT builds a logical router DNAT/SNAT
@@ -926,13 +932,15 @@ func BuildDNATAndSNAT(
 	if logicalIP != nil {
 		logicalIPStr = logicalIP.IP.String()
 	}
+	allowedExtIPs := ""
 	return buildNAT(
 		nbdb.NATTypeDNATAndSNAT,
 		externalIPStr,
 		logicalIPStr,
 		logicalPort,
 		externalMac,
-		externalIDs)
+		externalIDs,
+		allowedExtIPs)
 }
 
 // isEquivalentNAT if it has same uuid. Otherwise, check if types match.
@@ -1028,6 +1036,31 @@ func GetRouterNATs(nbClient libovsdbclient.Client, router *nbdb.LogicalRouter) (
 	}
 
 	return nats, nil
+}
+
+// UpdateNATAllowedExtIPs sets external IDs on the provided logical
+// router adding any missing, removing the ones set to an empty value and
+// updating existing
+func UpdateNATAllowedExtIPs(nbClient libovsdbclient.Client, nat *nbdb.NAT) error {
+	allowedExtIPs := nat.AllowedExtIPs
+	nat, err := GetNAT(nbClient, nat)
+	if err != nil {
+		return err
+	}
+
+	// FIXME(Mk): update not replace
+	nat.AllowedExtIPs = allowedExtIPs
+
+	opModel := operationModel{
+		Model:          nat,
+		OnModelUpdates: []interface{}{&nat.AllowedExtIPs},
+		ErrNotFound:    true,
+		BulkOp:         false,
+	}
+
+	m := newModelClient(nbClient)
+	_, err = m.CreateOrUpdate(opModel)
+	return err
 }
 
 // CreateOrUpdateNATsOps creates or updates the provided NATs, adds them to

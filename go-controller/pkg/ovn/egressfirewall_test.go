@@ -984,7 +984,7 @@ var _ = ginkgo.Describe("OVN EgressFirewall Operations", func() {
 
 					var err error
 					setDNSOpsMock(dnsName, resolvedIP)
-					fakeOVN.controller.egressFirewallDNS, err = NewEgressDNS(fakeOVN.controller.addressSetFactory,
+					fakeOVN.controller.egressFirewallDNS, err = NewEgressDNS(fakeOVN.controller.addressSetFactoryIPs,
 						fakeOVN.controller.controllerName, fakeOVN.controller.stopChan)
 					gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
@@ -998,7 +998,7 @@ var _ = ginkgo.Describe("OVN EgressFirewall Operations", func() {
 					retry.CheckRetryObjectEventually(efKey, true, fakeOVN.controller.retryEgressFirewalls)
 
 					// check dns address set was created
-					addrSet, _ := addressset.GetTestDbAddrSets(
+					addrSet, _ := addressset.GetTestDbAddrSetsIPs(
 						getEgressFirewallDNSAddrSetDbIDs(dnsName, fakeOVN.controller.controllerName),
 						[]net.IP{net.ParseIP(resolvedIP)})
 					expectedDatabaseState := append(initialData, addrSet)

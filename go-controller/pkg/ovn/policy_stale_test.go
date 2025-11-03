@@ -267,8 +267,8 @@ var _ = ginkgo.Describe("OVN Stale NetworkPolicy Operations", func() {
 			startOvn(libovsdbtest.TestSetup{NBData: initialData}, []v1.Namespace{namespace1, namespace2},
 				[]knet.NetworkPolicy{*networkPolicy})
 
-			fakeOvn.asf.ExpectEmptyAddressSet(namespaceName1)
-			fakeOvn.asf.ExpectEmptyAddressSet(namespaceName2)
+			fakeOvn.asfIPs.ExpectEmptyAddressSet(namespaceName1)
+			fakeOvn.asfIPs.ExpectEmptyAddressSet(namespaceName2)
 
 			_, err := fakeOvn.fakeClient.KubeClient.NetworkingV1().NetworkPolicies(networkPolicy.Namespace).
 				Get(context.TODO(), networkPolicy.Name, metav1.GetOptions{})
@@ -295,8 +295,8 @@ var _ = ginkgo.Describe("OVN Stale NetworkPolicy Operations", func() {
 			startOvn(libovsdbtest.TestSetup{NBData: initialData}, []v1.Namespace{namespace1, namespace2},
 				[]knet.NetworkPolicy{*networkPolicy})
 
-			fakeOvn.asf.ExpectEmptyAddressSet(longNamespaceName63)
-			fakeOvn.asf.ExpectEmptyAddressSet(namespaceName2)
+			fakeOvn.asfIPs.ExpectEmptyAddressSet(longNamespaceName63)
+			fakeOvn.asfIPs.ExpectEmptyAddressSet(namespaceName2)
 
 			_, err := fakeOvn.fakeClient.KubeClient.NetworkingV1().NetworkPolicies(networkPolicy.Namespace).
 				Get(context.TODO(), networkPolicy.Name, metav1.GetOptions{})
@@ -327,20 +327,20 @@ var _ = ginkgo.Describe("OVN Stale NetworkPolicy Operations", func() {
 			defaultDenyInitialData := getStaleDefaultDenyData(networkPolicy)
 			initialData = append(initialData, defaultDenyInitialData...)
 			initialData = append(initialData, initialDB.NBData...)
-			_, err := fakeOvn.asf.NewAddressSet(staleAddrSetIDs, nil)
+			_, err := fakeOvn.asfIPs.NewAddressSet(staleAddrSetIDs, nil)
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 			startOvn(libovsdbtest.TestSetup{NBData: initialData}, []v1.Namespace{namespace1, namespace2},
 				[]knet.NetworkPolicy{*networkPolicy})
 
-			fakeOvn.asf.ExpectEmptyAddressSet(namespaceName1)
-			fakeOvn.asf.ExpectEmptyAddressSet(namespaceName2)
+			fakeOvn.asfIPs.ExpectEmptyAddressSet(namespaceName1)
+			fakeOvn.asfIPs.ExpectEmptyAddressSet(namespaceName2)
 
 			// make sure stale ACLs were updated
 			expectedData := getNamespaceWithSinglePolicyExpectedData(
 				newNetpolDataParams(networkPolicy).withPeerNamespaces(namespace2.Name),
 				initialDB.NBData)
-			fakeOvn.asf.ExpectEmptyAddressSet(staleAddrSetIDs)
+			fakeOvn.asfIPs.ExpectEmptyAddressSet(staleAddrSetIDs)
 
 			gomega.Eventually(fakeOvn.nbClient).Should(libovsdbtest.HaveData(expectedData...))
 		})

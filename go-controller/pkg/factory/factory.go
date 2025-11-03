@@ -149,6 +149,7 @@ var (
 	NodeType                              reflect.Type = reflect.TypeOf(&kapi.Node{})
 	EgressFirewallType                    reflect.Type = reflect.TypeOf(&egressfirewallapi.EgressFirewall{})
 	EgressIPType                          reflect.Type = reflect.TypeOf(&egressipapi.EgressIP{})
+	EgressIPTrafficType                   reflect.Type = reflect.TypeOf(&egressipapi.EgressIPTraffic{})
 	EgressIPNamespaceType                 reflect.Type = reflect.TypeOf(&egressIPNamespace{})
 	EgressIPPodType                       reflect.Type = reflect.TypeOf(&egressIPPod{})
 	EgressNodeType                        reflect.Type = reflect.TypeOf(&egressNode{})
@@ -320,6 +321,10 @@ func NewOVNKubeControllerWatchFactory(ovnClientset *util.OVNKubeControllerClient
 	}
 	if config.OVNKubernetesFeature.EnableEgressIP {
 		wf.informers[EgressIPType], err = newInformer(EgressIPType, wf.eipFactory.K8s().V1().EgressIPs().Informer())
+		if err != nil {
+			return nil, err
+		}
+		wf.informers[EgressIPTrafficType], err = newInformer(EgressIPTrafficType, wf.eipFactory.K8s().V1().EgressIPTraffics().Informer())
 		if err != nil {
 			return nil, err
 		}
@@ -549,6 +554,10 @@ func NewNodeWatchFactory(ovnClientset *util.OVNNodeClientset, nodeName string) (
 		if err != nil {
 			return nil, err
 		}
+		wf.informers[EgressIPTrafficType], err = newInformer(EgressIPTrafficType, wf.eipFactory.K8s().V1().EgressIPTraffics().Informer())
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	if config.OVNKubernetesFeature.EnableMultiExternalGateway {
@@ -706,6 +715,10 @@ func getObjectMeta(objType reflect.Type, obj interface{}) (*metav1.ObjectMeta, e
 		if egressIP, ok := obj.(*egressipapi.EgressIP); ok {
 			return &egressIP.ObjectMeta, nil
 		}
+	case EgressIPTrafficType:
+		if egressIPTraffic, ok := obj.(*egressipapi.EgressIPTraffic); ok {
+			return &egressIPTraffic.ObjectMeta, nil
+		}
 	case CloudPrivateIPConfigType:
 		if cloudPrivateIPConfig, ok := obj.(*ocpcloudnetworkapi.CloudPrivateIPConfig); ok {
 			return &cloudPrivateIPConfig.ObjectMeta, nil
@@ -815,6 +828,12 @@ func (wf *WatchFactory) GetResourceHandlerFunc(objType reflect.Type) (AddHandler
 		return func(namespace string, sel labels.Selector,
 			funcs cache.ResourceEventHandler, processExisting func([]interface{}) error) (*Handler, error) {
 			return wf.AddEgressIPHandler(funcs, processExisting)
+		}, nil
+
+	case EgressIPTrafficType:
+		return func(namespace string, sel labels.Selector,
+			funcs cache.ResourceEventHandler, processExisting func([]interface{}) error) (*Handler, error) {
+			return wf.AddEgressIPTrafficHandler(funcs, processExisting)
 		}, nil
 
 	case CloudPrivateIPConfigType:
@@ -994,6 +1013,16 @@ func (wf *WatchFactory) RemoveEgressIPHandler(handler *Handler) {
 	wf.removeHandler(EgressIPType, handler)
 }
 
+// AddEgressIPTrafficHandler adds a handler function that will be executed on EgressIPTraffic object changes
+func (wf *WatchFactory) AddEgressIPTrafficHandler(handlerFuncs cache.ResourceEventHandler, processExisting func([]interface{}) error) (*Handler, error) {
+	return wf.addHandler(EgressIPTrafficType, "", nil, handlerFuncs, processExisting, defaultHandlerPriority)
+}
+
+// RemoveEgressIPTrafficHandler removes an EgressIPTraffic object event handler function
+func (wf *WatchFactory) RemoveEgressIPTrafficHandler(handler *Handler) {
+	wf.removeHandler(EgressIPTrafficType, handler)
+}
+
 // AddCloudPrivateIPConfigHandler adds a handler function that will be executed on CloudPrivateIPConfig object changes
 func (wf *WatchFactory) AddCloudPrivateIPConfigHandler(handlerFuncs cache.ResourceEventHandler, processExisting func([]interface{}) error) (*Handler, error) {
 	return wf.addHandler(CloudPrivateIPConfigType, "", nil, handlerFuncs, processExisting, defaultHandlerPriority)
@@ -1140,6 +1169,20 @@ func (wf *WatchFactory) GetEgressIPs() ([]*egressipapi.EgressIP, error) {
 	return egressIPLister.List(labels.Everything())
 }
 
+func (wf *WatchFactory) GetEgressIPTraffic(name string) (*egressipapi.EgressIPTraffic, error) {
+	egressIPTrafficLister := wf.informers[EgressIPTrafficType].lister.(egressiplister.EgressIPTrafficLister)
+	return egressIPTrafficLister.Get(name)
+}
+
+func (wf *WatchFactory) GetEgressIPTraffics() ([]*egressipapi.EgressIPTraffic, error) {
+	return wf.ListEgressIPTraffics(labels.Everything())
+}
+
+func (wf *WatchFactory) ListEgressIPTraffics(selector labels.Selector) ([]*egressipapi.EgressIPTraffic, error) {
+	egressIPTrafficLister := wf.informers[EgressIPTrafficType].lister.(egressiplister.EgressIPTrafficLister)
+	return egressIPTrafficLister.List(selector)
+}
+
 // GetNamespace returns a specific namespace
 func (wf *WatchFactory) GetNamespace(name string) (*kapi.Namespace, error) {
 	namespaceLister := wf.informers[NamespaceType].lister.(listers.NamespaceLister)
@@ -1266,6 +1309,10 @@ func (wf *WatchFactory) BANPInformer() anpinformer.BaselineAdminNetworkPolicyInf
 
 func (wf *WatchFactory) EgressIPInformer() egressipinformer.EgressIPInformer {
 	return wf.eipFactory.K8s().V1().EgressIPs()
+}
+
+func (wf *WatchFactory) EgressIPTrafficInformer() egressipinformer.EgressIPTrafficInformer {
+	return wf.eipFactory.K8s().V1().EgressIPTraffics()
 }
 
 func (wf *WatchFactory) EgressFirewallInformer() egressfirewallinformer.EgressFirewallInformer {

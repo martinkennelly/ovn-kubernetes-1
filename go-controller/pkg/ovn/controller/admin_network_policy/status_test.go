@@ -112,7 +112,7 @@ func newANPControllerWithDBSetup(dbSetup libovsdbtest.TestSetup, initANPs anpapi
 		err = createTestNBGlobal(nbClient, "global")
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	}
-	addressSetFactory := addressset.NewOvnAddressSetFactory(nbClient, config.IPv4Mode, config.IPv6Mode)
+	addressSetFactory := addressset.NewOvnAddressSetFactoryForIPs(nbClient, config.IPv4Mode, config.IPv6Mode)
 	recorder := record.NewFakeRecorder(10)
 	controller, err := NewController(
 		"default-network-controller",

@@ -2,6 +2,7 @@ package addressset
 
 import (
 	"net"
+	"strings"
 
 	"github.com/onsi/ginkgo"
 	"github.com/onsi/gomega"
@@ -15,12 +16,28 @@ import (
 	libovsdbtest "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/testing/libovsdb"
 )
 
-func getDbAddrSets(dbIDs *libovsdbops.DbObjectIDs, ipFamily string, ips []string) *nbdb.AddressSet {
-	parsedIPs := []net.IP{}
-	for _, ip := range ips {
-		parsedIPs = append(parsedIPs, net.ParseIP(ip))
+// getDbAddrSets creates test address sets for either IPs or CIDRs
+func getDbAddrSets(dbIDs *libovsdbops.DbObjectIDs, ipFamily string, addresses []string) *nbdb.AddressSet {
+	var asv4, asv6 *nbdb.AddressSet
+	// process addresses based on whether they are CIDRs or IPs
+	if len(addresses) > 0 && isCIDR(addresses[0]) {
+		parsedCIDRs := make([]*net.IPNet, 0, len(addresses))
+		for _, cidr := range addresses {
+			_, ipNet, err := net.ParseCIDR(cidr)
+			if err != nil {
+				panic(err.Error())
+			}
+			parsedCIDRs = append(parsedCIDRs, ipNet)
+		}
+		asv4, asv6 = GetTestDbAddrSetsCIDRs(dbIDs, parsedCIDRs)
+	} else {
+		parsedIPs := make([]net.IP, 0, len(addresses))
+		for _, ip := range addresses {
+			parsedIPs = append(parsedIPs, net.ParseIP(ip))
+		}
+		asv4, asv6 = GetTestDbAddrSetsIPs(dbIDs, parsedIPs)
 	}
-	asv4, asv6 := GetTestDbAddrSets(dbIDs, parsedIPs)
+
 	if ipFamily == ipv4InternalID {
 		asv4.UUID = asv4.Name + "-UUID"
 		return asv4
@@ -30,12 +47,12 @@ func getDbAddrSets(dbIDs *libovsdbops.DbObjectIDs, ipFamily string, ips []string
 	}
 }
 
-func getDbAsV4(dbIDs *libovsdbops.DbObjectIDs, ips []string) *nbdb.AddressSet {
-	return getDbAddrSets(dbIDs, ipv4InternalID, ips)
+func getDbAsV4(dbIDs *libovsdbops.DbObjectIDs, addresses []string) *nbdb.AddressSet {
+	return getDbAddrSets(dbIDs, ipv4InternalID, addresses)
 }
 
-func getDbAsWithUUID(dbIDs *libovsdbops.DbObjectIDs, ips []string, UUID string, ipFamily string) *nbdb.AddressSet {
-	as := getDbAddrSets(dbIDs, ipFamily, ips)
+func getDbAsWithUUID(dbIDs *libovsdbops.DbObjectIDs, addresses []string, UUID string, ipFamily string) *nbdb.AddressSet {
+	as := getDbAddrSets(dbIDs, ipFamily, addresses)
 	as.UUID = UUID
 	return as
 }
@@ -47,7 +64,11 @@ func getNamespaceAddrSetDbIDs(namespaceName, controller string) *libovsdbops.DbO
 	})
 }
 
-var _ = ginkgo.Describe("OVN Address Set operations", func() {
+func isCIDR(s string) bool {
+	return strings.Contains(s, "/")
+}
+
+var _ = ginkgo.Describe("OVN IP Address Set operations", func() {
 	const (
 		addrsetName    = "foobar"
 		ipAddress1     = "1.2.3.4"
@@ -61,7 +82,7 @@ var _ = ginkgo.Describe("OVN Address Set operations", func() {
 
 	var (
 		app          *cli.App
-		asFactory    AddressSetFactory
+		asFactory    AddressSetFactoryIPs
 		testdbCtx    *libovsdbtest.Context
 		nbClient     libovsdbclient.Client
 		addrsetDbIDs = getNamespaceAddrSetDbIDs(addrsetName, controllerName)
@@ -121,7 +142,7 @@ var _ = ginkgo.Describe("OVN Address Set operations", func() {
 
 				_, err = config.InitConfig(ctx, nil, nil)
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
-				asFactory = NewOvnAddressSetFactory(nbClient, config.IPv4Mode, config.IPv6Mode)
+				asFactory = NewOvnAddressSetFactoryForIPs(nbClient, config.IPv4Mode, config.IPv6Mode)
 
 				expectedIndexes := map[string]*libovsdbops.DbObjectIDs{
 					"":   libovsdbops.NewDbObjectIDs(libovsdbops.AddressSetNamespace, controllerName, nil),
@@ -156,7 +177,7 @@ var _ = ginkgo.Describe("OVN Address Set operations", func() {
 
 				_, err = config.InitConfig(ctx, nil, nil)
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
-				asFactory = NewOvnAddressSetFactory(nbClient, config.IPv4Mode, config.IPv6Mode)
+				asFactory = NewOvnAddressSetFactoryForIPs(nbClient, config.IPv4Mode, config.IPv6Mode)
 
 				_, err = asFactory.NewAddressSet(addrsetDbIDs, []net.IP{net.ParseIP(addr1), net.ParseIP(addr2)})
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
@@ -179,7 +200,7 @@ var _ = ginkgo.Describe("OVN Address Set operations", func() {
 
 				_, err = config.InitConfig(ctx, nil, nil)
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
-				asFactory = NewOvnAddressSetFactory(nbClient, config.IPv4Mode, config.IPv6Mode)
+				asFactory = NewOvnAddressSetFactoryForIPs(nbClient, config.IPv4Mode, config.IPv6Mode)
 
 				_, err = asFactory.NewAddressSet(addrsetDbIDs, nil)
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
@@ -196,7 +217,7 @@ var _ = ginkgo.Describe("OVN Address Set operations", func() {
 			app.Action = func(ctx *cli.Context) error {
 				_, err := config.InitConfig(ctx, nil, nil)
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
-				asFactory = NewOvnAddressSetFactory(nbClient, config.IPv4Mode, config.IPv6Mode)
+				asFactory = NewOvnAddressSetFactoryForIPs(nbClient, config.IPv4Mode, config.IPv6Mode)
 
 				expectedDatabaseState := getDbAsV4(addrsetDbIDs, []string{ipAddress1, ipAddress2})
 				_, err = asFactory.NewAddressSet(addrsetDbIDs, []net.IP{net.ParseIP(ipAddress1), net.ParseIP(ipAddress2)})
@@ -217,7 +238,7 @@ var _ = ginkgo.Describe("OVN Address Set operations", func() {
 
 				_, err = config.InitConfig(ctx, nil, nil)
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
-				asFactory = NewOvnAddressSetFactory(nbClient, config.IPv4Mode, config.IPv6Mode)
+				asFactory = NewOvnAddressSetFactoryForIPs(nbClient, config.IPv4Mode, config.IPv6Mode)
 
 				as, err := asFactory.EnsureAddressSet(addrsetDbIDs)
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
@@ -247,7 +268,7 @@ var _ = ginkgo.Describe("OVN Address Set operations", func() {
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
 				config.IPv6Mode = true
 				config.IPv4Mode = true
-				asFactory = NewOvnAddressSetFactory(nbClient, config.IPv4Mode, config.IPv6Mode)
+				asFactory = NewOvnAddressSetFactoryForIPs(nbClient, config.IPv4Mode, config.IPv6Mode)
 
 				expectedDatabaseState := []libovsdbtest.TestData{
 					getDbAsWithUUID(addrsetDbIDs, []string{ipAddress1, ipAddress2}, fakeUUID, ipv4InternalID),
@@ -278,7 +299,7 @@ var _ = ginkgo.Describe("OVN Address Set operations", func() {
 
 				_, err = config.InitConfig(ctx, nil, nil)
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
-				asFactory = NewOvnAddressSetFactory(nbClient, config.IPv4Mode, config.IPv6Mode)
+				asFactory = NewOvnAddressSetFactoryForIPs(nbClient, config.IPv4Mode, config.IPv6Mode)
 
 				as, err := asFactory.EnsureAddressSet(addrsetDbIDs)
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
@@ -306,7 +327,7 @@ var _ = ginkgo.Describe("OVN Address Set operations", func() {
 			app.Action = func(ctx *cli.Context) error {
 				_, err := config.InitConfig(ctx, nil, nil)
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
-				asFactory = NewOvnAddressSetFactory(nbClient, config.IPv4Mode, config.IPv6Mode)
+				asFactory = NewOvnAddressSetFactoryForIPs(nbClient, config.IPv4Mode, config.IPv6Mode)
 				expectedDatabaseState := getDbAsV4(addrsetDbIDs, nil)
 
 				as, err := asFactory.EnsureAddressSet(addrsetDbIDs)
@@ -327,7 +348,7 @@ var _ = ginkgo.Describe("OVN Address Set operations", func() {
 		app.Action = func(ctx *cli.Context) error {
 			_, err := config.InitConfig(ctx, nil, nil)
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
-			asFactory = NewOvnAddressSetFactory(nbClient, config.IPv4Mode, config.IPv6Mode)
+			asFactory = NewOvnAddressSetFactoryForIPs(nbClient, config.IPv4Mode, config.IPv6Mode)
 
 			as, err := asFactory.NewAddressSet(addrsetDbIDs, []net.IP{net.ParseIP(ipAddress1), net.ParseIP(ipAddress2)})
 
@@ -350,7 +371,7 @@ var _ = ginkgo.Describe("OVN Address Set operations", func() {
 
 				_, err := config.InitConfig(ctx, nil, nil)
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
-				asFactory = NewOvnAddressSetFactory(nbClient, config.IPv4Mode, config.IPv6Mode)
+				asFactory = NewOvnAddressSetFactoryForIPs(nbClient, config.IPv4Mode, config.IPv6Mode)
 
 				as, err := asFactory.NewAddressSet(addrsetDbIDs, nil)
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
@@ -372,7 +393,7 @@ var _ = ginkgo.Describe("OVN Address Set operations", func() {
 
 				_, err := config.InitConfig(ctx, nil, nil)
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
-				asFactory = NewOvnAddressSetFactory(nbClient, config.IPv4Mode, config.IPv6Mode)
+				asFactory = NewOvnAddressSetFactoryForIPs(nbClient, config.IPv4Mode, config.IPv6Mode)
 
 				as, err := asFactory.NewAddressSet(addrsetDbIDs, nil)
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
@@ -399,7 +420,7 @@ var _ = ginkgo.Describe("OVN Address Set operations", func() {
 
 				_, err := config.InitConfig(ctx, nil, nil)
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
-				asFactory = NewOvnAddressSetFactory(nbClient, config.IPv4Mode, config.IPv6Mode)
+				asFactory = NewOvnAddressSetFactoryForIPs(nbClient, config.IPv4Mode, config.IPv6Mode)
 
 				as, err := asFactory.NewAddressSet(addrsetDbIDs, nil)
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
@@ -431,7 +452,7 @@ var _ = ginkgo.Describe("OVN Address Set operations", func() {
 				_, err = config.InitConfig(ctx, nil, nil)
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
 				config.IPv4Mode = true
-				asFactory = NewOvnAddressSetFactory(nbClient, config.IPv4Mode, config.IPv6Mode)
+				asFactory = NewOvnAddressSetFactoryForIPs(nbClient, config.IPv4Mode, config.IPv6Mode)
 
 				as, err := asFactory.EnsureAddressSet(addrsetDbIDs)
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
@@ -454,7 +475,7 @@ var _ = ginkgo.Describe("OVN Address Set operations", func() {
 				_, err := config.InitConfig(ctx, nil, nil)
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
-				asFactory = NewOvnAddressSetFactory(nbClient, config.IPv4Mode, config.IPv6Mode)
+				asFactory = NewOvnAddressSetFactoryForIPs(nbClient, config.IPv4Mode, config.IPv6Mode)
 				as, err := asFactory.NewAddressSet(addrsetDbIDs, []net.IP{net.ParseIP(addr1)})
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
@@ -481,7 +502,7 @@ var _ = ginkgo.Describe("OVN Address Set operations", func() {
 				_, err := config.InitConfig(ctx, nil, nil)
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
-				asFactory = NewOvnAddressSetFactory(nbClient, config.IPv4Mode, config.IPv6Mode)
+				asFactory = NewOvnAddressSetFactoryForIPs(nbClient, config.IPv4Mode, config.IPv6Mode)
 				as, err := asFactory.NewAddressSet(addrsetDbIDs, []net.IP{net.ParseIP(addr1)})
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
@@ -511,7 +532,7 @@ var _ = ginkgo.Describe("OVN Address Set operations", func() {
 				_, err := config.InitConfig(ctx, nil, nil)
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
-				asFactory = NewOvnAddressSetFactory(nbClient, config.IPv4Mode, config.IPv6Mode)
+				asFactory = NewOvnAddressSetFactoryForIPs(nbClient, config.IPv4Mode, config.IPv6Mode)
 				as, err := asFactory.NewAddressSet(addrsetDbIDs, []net.IP{net.ParseIP(addr1)})
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
@@ -542,7 +563,7 @@ var _ = ginkgo.Describe("OVN Address Set operations", func() {
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
 				config.IPv6Mode = true
 
-				asFactory = NewOvnAddressSetFactory(nbClient, config.IPv4Mode, config.IPv6Mode)
+				asFactory = NewOvnAddressSetFactoryForIPs(nbClient, config.IPv4Mode, config.IPv6Mode)
 
 				_, err = asFactory.NewAddressSet(addrsetDbIDs, []net.IP{net.ParseIP(addr1), net.ParseIP(addr2),
 					net.ParseIP(addr3), net.ParseIP(addr4)})
@@ -571,7 +592,7 @@ var _ = ginkgo.Describe("OVN Address Set operations", func() {
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
 				config.IPv6Mode = true
 
-				asFactory = NewOvnAddressSetFactory(nbClient, config.IPv4Mode, config.IPv6Mode)
+				asFactory = NewOvnAddressSetFactoryForIPs(nbClient, config.IPv4Mode, config.IPv6Mode)
 
 				_, err = asFactory.NewAddressSet(addrsetDbIDs, []net.IP{net.ParseIP(addr1), net.ParseIP(addr2),
 					net.ParseIP(addr3), net.ParseIP(addr4)})
@@ -603,7 +624,7 @@ var _ = ginkgo.Describe("OVN Address Set operations", func() {
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
 				config.IPv6Mode = true
 
-				asFactory = NewOvnAddressSetFactory(nbClient, config.IPv4Mode, config.IPv6Mode)
+				asFactory = NewOvnAddressSetFactoryForIPs(nbClient, config.IPv4Mode, config.IPv6Mode)
 
 				_, err = asFactory.NewAddressSet(addrsetDbIDs, []net.IP{net.ParseIP(addr1), net.ParseIP(addr2),
 					net.ParseIP(addr3), net.ParseIP(addr4)})
@@ -633,7 +654,7 @@ var _ = ginkgo.Describe("OVN Address Set operations", func() {
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 			config.IPv6Mode = true
 
-			asFactory = NewOvnAddressSetFactory(nbClient, config.IPv4Mode, config.IPv6Mode)
+			asFactory = NewOvnAddressSetFactoryForIPs(nbClient, config.IPv4Mode, config.IPv6Mode)
 
 			as, err := asFactory.NewAddressSet(addrsetDbIDs, []net.IP{net.ParseIP(addr1), net.ParseIP(addr2),
 				net.ParseIP(addr3), net.ParseIP(addr4)})
@@ -665,7 +686,7 @@ var _ = ginkgo.Describe("OVN Address Set operations", func() {
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
 				config.IPv6Mode = true
 
-				asFactory = NewOvnAddressSetFactory(nbClient, config.IPv4Mode, config.IPv6Mode)
+				asFactory = NewOvnAddressSetFactoryForIPs(nbClient, config.IPv4Mode, config.IPv6Mode)
 
 				as, err := asFactory.NewAddressSet(addrsetDbIDs, nil)
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
@@ -703,7 +724,7 @@ var _ = ginkgo.Describe("OVN Address Set operations", func() {
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
 				config.IPv6Mode = true
 
-				asFactory = NewOvnAddressSetFactory(nbClient, config.IPv4Mode, config.IPv6Mode)
+				asFactory = NewOvnAddressSetFactoryForIPs(nbClient, config.IPv4Mode, config.IPv6Mode)
 				as, err := asFactory.NewAddressSet(addrsetDbIDs, []net.IP{net.ParseIP(addr1), net.ParseIP(addr2)})
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
 				expectedDatabaseState := []libovsdbtest.TestData{
@@ -722,6 +743,739 @@ var _ = ginkgo.Describe("OVN Address Set operations", func() {
 
 				// Deleting a non-existent address is a no-op
 				err = as.DeleteIPs([]net.IP{net.ParseIP(addr1)})
+				gomega.Expect(err).NotTo(gomega.HaveOccurred())
+
+				return nil
+			}
+
+			err := app.Run([]string{app.Name})
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		})
+	})
+})
+
+var _ = ginkgo.FDescribe("OVN CIDR Address Set operations", func() {
+	const (
+		addrsetName    = "foobar"
+		cidrAddress1   = "1.2.3.0/24"
+		cidrAddress2   = "5.6.7.0/24"
+		cidrAddress3   = "fd00:10:244::/64"
+		cidrAddress4   = "fc00:f853:ccd:e793::4/128"
+		fakeUUID       = "8a86f6d8-7972-4253-b0bd-ddbef66e9303"
+		fakeUUIDv6     = "8a86f6d8-7972-4253-b0bd-ddbef66e9304"
+		controllerName = "fake-controller"
+	)
+
+	var (
+		app          *cli.App
+		asFactory    AddressSetFactoryCIDRs
+		testdbCtx    *libovsdbtest.Context
+		nbClient     libovsdbclient.Client
+		addrsetDbIDs = getNamespaceAddrSetDbIDs(addrsetName, controllerName)
+	)
+
+	ginkgo.BeforeEach(func() {
+		// Restore global default values before each testcase
+		gomega.Expect(config.PrepareTestConfig()).Should(gomega.Succeed())
+
+		app = cli.NewApp()
+		app.Name = "test"
+		app.Flags = config.Flags
+
+		var err error
+		nbClient, testdbCtx, err = libovsdbtest.NewNBTestHarness(libovsdbtest.TestSetup{}, nil)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+	})
+
+	ginkgo.AfterEach(func() {
+		testdbCtx.Cleanup()
+	})
+
+	ginkgo.Context("when iterating address sets", func() {
+		ginkgo.It("calls the iterator function for each address set with given controller name", func() {
+			app.Action = func(ctx *cli.Context) error {
+				dbSetup := []libovsdbtest.TestData{
+					&nbdb.AddressSet{
+						Name: "1",
+						ExternalIDs: map[string]string{
+							libovsdbops.OwnerControllerKey.String(): controllerName,
+							libovsdbops.OwnerTypeKey.String():       string(libovsdbops.NamespaceOwnerType),
+						},
+					},
+					&nbdb.AddressSet{
+						Name: "2",
+						ExternalIDs: map[string]string{
+							libovsdbops.OwnerControllerKey.String(): controllerName,
+							libovsdbops.OwnerTypeKey.String():       string(libovsdbops.NamespaceOwnerType),
+							libovsdbops.ObjectNameKey.String():      "ns",
+						},
+					},
+					// another controller name, won't be handled
+					&nbdb.AddressSet{
+						Name:        "3",
+						ExternalIDs: map[string]string{libovsdbops.OwnerControllerKey.String(): "other-controller"},
+					},
+					// no OwnerTypeKey, won't be handled
+					&nbdb.AddressSet{
+						Name: "4",
+						ExternalIDs: map[string]string{
+							libovsdbops.OwnerControllerKey.String(): controllerName,
+						},
+					},
+				}
+				err := testdbCtx.NBServer.CreateTestData(dbSetup)
+				gomega.Expect(err).NotTo(gomega.HaveOccurred())
+
+				_, err = config.InitConfig(ctx, nil, nil)
+				gomega.Expect(err).NotTo(gomega.HaveOccurred())
+				asFactory = NewOvnAddressSetFactoryForCIDRs(nbClient, config.IPv4Mode, config.IPv6Mode)
+
+				expectedIndexes := map[string]*libovsdbops.DbObjectIDs{
+					"":   libovsdbops.NewDbObjectIDs(libovsdbops.AddressSetNamespace, controllerName, nil),
+					"ns": getNamespaceAddrSetDbIDs("ns", controllerName),
+				}
+				handledIndexes := map[string]*libovsdbops.DbObjectIDs{}
+				_ = asFactory.ProcessEachAddressSet(controllerName, libovsdbops.AddressSetNamespace,
+					func(dbIDs *libovsdbops.DbObjectIDs) error {
+						handledIndexes[dbIDs.GetObjectID(libovsdbops.ObjectNameKey)] = dbIDs
+						return nil
+					})
+				gomega.Expect(handledIndexes).To(gomega.BeEquivalentTo(expectedIndexes))
+				gomega.Expect(err).NotTo(gomega.HaveOccurred())
+				return nil
+			}
+
+			err := app.Run([]string{app.Name})
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		})
+	})
+
+	ginkgo.Context("when creating an address set object", func() {
+		ginkgo.It("re-uses an existing address set and replaces CIDRs", func() {
+			app.Action = func(ctx *cli.Context) error {
+				oldAS := getDbAsV4(addrsetDbIDs, []string{"10.10.0.0/16"})
+				err := testdbCtx.NBServer.CreateTestData([]libovsdbtest.TestData{oldAS})
+				gomega.Expect(err).NotTo(gomega.HaveOccurred())
+
+				_, err = config.InitConfig(ctx, nil, nil)
+				gomega.Expect(err).NotTo(gomega.HaveOccurred())
+				asFactory = NewOvnAddressSetFactoryForCIDRs(nbClient, config.IPv4Mode, config.IPv6Mode)
+				_, addr1IPNet, err := net.ParseCIDR(cidrAddress1)
+				gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+				_, addr2IPNet, err := net.ParseCIDR(cidrAddress2)
+				gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+				_, err = asFactory.NewAddressSet(addrsetDbIDs, []*net.IPNet{addr1IPNet, addr2IPNet})
+				gomega.Expect(err).NotTo(gomega.HaveOccurred())
+				expectedDatabaseState := getDbAsV4(addrsetDbIDs, []string{cidrAddress1, cidrAddress2})
+
+				gomega.Eventually(nbClient).Should(libovsdbtest.HaveDataIgnoringUUIDs(expectedDatabaseState))
+				gomega.Expect(err).NotTo(gomega.HaveOccurred())
+				return nil
+			}
+
+			err := app.Run([]string{app.Name})
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		})
+
+		ginkgo.It("clears an existing address set of CIDRs", func() {
+			app.Action = func(ctx *cli.Context) error {
+				oldAS := getDbAsV4(addrsetDbIDs, []string{"10.10.0.0/16"})
+				err := testdbCtx.NBServer.CreateTestData([]libovsdbtest.TestData{oldAS})
+				gomega.Expect(err).NotTo(gomega.HaveOccurred())
+
+				_, err = config.InitConfig(ctx, nil, nil)
+				gomega.Expect(err).NotTo(gomega.HaveOccurred())
+				asFactory = NewOvnAddressSetFactoryForCIDRs(nbClient, config.IPv4Mode, config.IPv6Mode)
+
+				_, err = asFactory.NewAddressSet(addrsetDbIDs, nil)
+				gomega.Expect(err).NotTo(gomega.HaveOccurred())
+				expectedDatabaseState := getDbAsV4(addrsetDbIDs, nil)
+				gomega.Eventually(nbClient).Should(libovsdbtest.HaveDataIgnoringUUIDs(expectedDatabaseState))
+				return nil
+			}
+
+			err := app.Run([]string{app.Name})
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		})
+
+		ginkgo.It("creates a new address set and sets CIDRs", func() {
+			app.Action = func(ctx *cli.Context) error {
+				_, err := config.InitConfig(ctx, nil, nil)
+				gomega.Expect(err).NotTo(gomega.HaveOccurred())
+				asFactory = NewOvnAddressSetFactoryForCIDRs(nbClient, config.IPv4Mode, config.IPv6Mode)
+
+				expectedDatabaseState := getDbAsV4(addrsetDbIDs, []string{cidrAddress1, cidrAddress2})
+				_, addr1IPNet, err := net.ParseCIDR(cidrAddress1)
+				gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+				_, addr2IPNet, err := net.ParseCIDR(cidrAddress2)
+				_, err = asFactory.NewAddressSet(addrsetDbIDs, []*net.IPNet{addr1IPNet, addr2IPNet})
+				gomega.Eventually(nbClient).Should(libovsdbtest.HaveDataIgnoringUUIDs(expectedDatabaseState))
+				gomega.Expect(err).NotTo(gomega.HaveOccurred())
+				return nil
+			}
+
+			err := app.Run([]string{app.Name})
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		})
+
+		ginkgo.It("ensures an address set exists and returns it", func() {
+			app.Action = func(ctx *cli.Context) error {
+				dbSetup := []libovsdbtest.TestData{getDbAsV4(addrsetDbIDs, []string{cidrAddress1})}
+				err := testdbCtx.NBServer.CreateTestData(dbSetup)
+				gomega.Expect(err).NotTo(gomega.HaveOccurred())
+
+				_, err = config.InitConfig(ctx, nil, nil)
+				gomega.Expect(err).NotTo(gomega.HaveOccurred())
+				asFactory = NewOvnAddressSetFactoryForCIDRs(nbClient, config.IPv4Mode, config.IPv6Mode)
+
+				as, err := asFactory.EnsureAddressSet(addrsetDbIDs)
+				gomega.Expect(err).NotTo(gomega.HaveOccurred())
+				expectedDatabaseState := []libovsdbtest.TestData{getDbAsV4(addrsetDbIDs, []string{cidrAddress1})}
+				gomega.Eventually(nbClient).Should(libovsdbtest.HaveData(expectedDatabaseState))
+				original_v4, original_v6 := as.GetASHashNames()
+				expected_v4, _ := GetHashNamesForAS(addrsetDbIDs)
+				gomega.Expect(original_v4).To(gomega.Equal(expected_v4))
+				gomega.Expect(original_v6).To(gomega.Equal(""))
+				return nil
+			}
+
+			err := app.Run([]string{app.Name})
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		})
+
+		ginkgo.It("ensures an address set exists and returns it, both ip4 and ipv6", func() {
+			app.Action = func(ctx *cli.Context) error {
+				dbSetup := []libovsdbtest.TestData{
+					getDbAsWithUUID(addrsetDbIDs, []string{cidrAddress1, cidrAddress2}, fakeUUID, ipv4InternalID),
+					getDbAsWithUUID(addrsetDbIDs, []string{cidrAddress3, cidrAddress4}, fakeUUIDv6, ipv6InternalID),
+				}
+				err := testdbCtx.NBServer.CreateTestData(dbSetup)
+				gomega.Expect(err).NotTo(gomega.HaveOccurred())
+
+				_, err = config.InitConfig(ctx, nil, nil)
+				gomega.Expect(err).NotTo(gomega.HaveOccurred())
+				config.IPv6Mode = true
+				config.IPv4Mode = true
+				asFactory = NewOvnAddressSetFactoryForCIDRs(nbClient, config.IPv4Mode, config.IPv6Mode)
+
+				expectedDatabaseState := []libovsdbtest.TestData{
+					getDbAsWithUUID(addrsetDbIDs, []string{cidrAddress1, cidrAddress2}, fakeUUID, ipv4InternalID),
+					getDbAsWithUUID(addrsetDbIDs, []string{cidrAddress3, cidrAddress4}, fakeUUIDv6, ipv6InternalID),
+				}
+
+				as, err := asFactory.EnsureAddressSet(addrsetDbIDs)
+				gomega.Expect(err).NotTo(gomega.HaveOccurred())
+				gomega.Eventually(nbClient).Should(libovsdbtest.HaveData(expectedDatabaseState))
+				original_v4, original_v6 := as.GetASHashNames()
+				expected_v4, expected_v6 := GetHashNamesForAS(addrsetDbIDs)
+				gomega.Expect(original_v4).To(gomega.Equal(expected_v4))
+				gomega.Expect(original_v6).To(gomega.Equal(expected_v6))
+				return nil
+			}
+
+			err := app.Run([]string{app.Name})
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		})
+
+		ginkgo.It("ensures an empty address set exists and returns it", func() {
+			app.Action = func(ctx *cli.Context) error {
+				dbSetup := []libovsdbtest.TestData{
+					getDbAsWithUUID(addrsetDbIDs, []string{}, fakeUUID, ipv4InternalID),
+				}
+				err := testdbCtx.NBServer.CreateTestData(dbSetup)
+				gomega.Expect(err).NotTo(gomega.HaveOccurred())
+
+				_, err = config.InitConfig(ctx, nil, nil)
+				gomega.Expect(err).NotTo(gomega.HaveOccurred())
+				asFactory = NewOvnAddressSetFactoryForCIDRs(nbClient, config.IPv4Mode, config.IPv6Mode)
+
+				as, err := asFactory.EnsureAddressSet(addrsetDbIDs)
+				gomega.Expect(err).NotTo(gomega.HaveOccurred())
+
+				expectedDatabaseState := []libovsdbtest.TestData{
+					getDbAsWithUUID(addrsetDbIDs, []string{}, fakeUUID, ipv4InternalID),
+				}
+
+				gomega.Eventually(nbClient).Should(libovsdbtest.HaveData(expectedDatabaseState))
+				original_v4, original_v6 := as.GetASHashNames()
+				expected_v4, _ := GetHashNamesForAS(addrsetDbIDs)
+				gomega.Expect(original_v4).To(gomega.Equal(expected_v4))
+				gomega.Expect(original_v6).To(gomega.Equal(""))
+				cidrsV4, cidrsV6 := as.GetCIDRs()
+				gomega.Expect(cidrsV4).To(gomega.BeNil())
+				gomega.Expect(cidrsV6).To(gomega.BeNil())
+				return nil
+			}
+
+			err := app.Run([]string{app.Name})
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		})
+
+		ginkgo.It("ensures an address set exists and if not creates a new one", func() {
+			app.Action = func(ctx *cli.Context) error {
+				_, err := config.InitConfig(ctx, nil, nil)
+				gomega.Expect(err).NotTo(gomega.HaveOccurred())
+				asFactory = NewOvnAddressSetFactoryForCIDRs(nbClient, config.IPv4Mode, config.IPv6Mode)
+				expectedDatabaseState := getDbAsV4(addrsetDbIDs, nil)
+
+				as, err := asFactory.EnsureAddressSet(addrsetDbIDs)
+				gomega.Expect(err).NotTo(gomega.HaveOccurred())
+				gomega.Eventually(nbClient).Should(libovsdbtest.HaveDataIgnoringUUIDs(expectedDatabaseState))
+				cidrsV4, cidrsV6 := as.GetCIDRs()
+				gomega.Expect(cidrsV4).To(gomega.BeNil())
+				gomega.Expect(cidrsV6).To(gomega.BeNil())
+				return nil
+			}
+
+			err := app.Run([]string{app.Name})
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		})
+	})
+
+	ginkgo.It("destroys an address set", func() {
+		app.Action = func(ctx *cli.Context) error {
+			_, err := config.InitConfig(ctx, nil, nil)
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			asFactory = NewOvnAddressSetFactoryForCIDRs(nbClient, config.IPv4Mode, config.IPv6Mode)
+			_, addr1IPNet, err := net.ParseCIDR(cidrAddress1)
+			gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+			_, addr2IPNet, err := net.ParseCIDR(cidrAddress2)
+			gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+			as, err := asFactory.NewAddressSet(addrsetDbIDs, []*net.IPNet{addr1IPNet, addr2IPNet})
+
+			err = as.Destroy()
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			expectedDatabaseState := []libovsdbtest.TestData{}
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			gomega.Eventually(nbClient).Should(libovsdbtest.HaveDataIgnoringUUIDs(expectedDatabaseState))
+			return nil
+		}
+
+		err := app.Run([]string{app.Name})
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+	})
+
+	ginkgo.Context("when manipulating CIDRs in an address set object", func() {
+		ginkgo.It("adds a CIDR to an empty address set", func() {
+			app.Action = func(ctx *cli.Context) error {
+				const addr1 string = "1.2.3.1/32"
+
+				_, err := config.InitConfig(ctx, nil, nil)
+				gomega.Expect(err).NotTo(gomega.HaveOccurred())
+				asFactory = NewOvnAddressSetFactoryForCIDRs(nbClient, config.IPv4Mode, config.IPv6Mode)
+
+				as, err := asFactory.NewAddressSet(addrsetDbIDs, nil)
+				gomega.Expect(err).NotTo(gomega.HaveOccurred())
+				_, addr1IPNet, err := net.ParseCIDR(addr1)
+				gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+				err = as.AddCIDRs([]*net.IPNet{addr1IPNet})
+				gomega.Expect(err).NotTo(gomega.HaveOccurred())
+				expectedDatabaseState := getDbAsV4(addrsetDbIDs, []string{addr1})
+				gomega.Eventually(nbClient).Should(libovsdbtest.HaveDataIgnoringUUIDs(expectedDatabaseState))
+				return nil
+			}
+
+			err := app.Run([]string{app.Name})
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		})
+
+		ginkgo.It("returns ops to add a CIDR to an empty address set", func() {
+			app.Action = func(ctx *cli.Context) error {
+				const addr1 string = "1.2.1.1/32"
+
+				_, err := config.InitConfig(ctx, nil, nil)
+				gomega.Expect(err).NotTo(gomega.HaveOccurred())
+				asFactory = NewOvnAddressSetFactoryForCIDRs(nbClient, config.IPv4Mode, config.IPv6Mode)
+
+				as, err := asFactory.NewAddressSet(addrsetDbIDs, nil)
+				gomega.Expect(err).NotTo(gomega.HaveOccurred())
+				_, addr1IPNet, err := net.ParseCIDR(addr1)
+				gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+				ops, err := as.AddCIDRsReturnOps([]*net.IPNet{addr1IPNet})
+				gomega.Expect(err).NotTo(gomega.HaveOccurred())
+				var addr1Interface interface{} = addr1
+				expectedOps, err := ovsdb.NewOvsSet(addr1Interface)
+				gomega.Expect(err).NotTo(gomega.HaveOccurred())
+				gomega.Expect(ops[0].Mutations[0].Value).To(gomega.Equal(expectedOps))
+				// nothing added to address set yet since transact isn't called
+				expectedDatabaseState := getDbAsV4(addrsetDbIDs, []string{})
+				gomega.Eventually(nbClient).Should(libovsdbtest.HaveDataIgnoringUUIDs(expectedDatabaseState))
+				return nil
+			}
+
+			err := app.Run([]string{app.Name})
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		})
+
+		ginkgo.It("returns ops to add duplicate CIDRs to an empty address set", func() {
+			app.Action = func(ctx *cli.Context) error {
+
+				_, err := config.InitConfig(ctx, nil, nil)
+				gomega.Expect(err).NotTo(gomega.HaveOccurred())
+				asFactory = NewOvnAddressSetFactoryForCIDRs(nbClient, config.IPv4Mode, config.IPv6Mode)
+
+				as, err := asFactory.NewAddressSet(addrsetDbIDs, nil)
+				gomega.Expect(err).NotTo(gomega.HaveOccurred())
+				_, addr1IPNet, err := net.ParseCIDR(cidrAddress1)
+				gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+				ops, err := as.AddCIDRsReturnOps([]*net.IPNet{addr1IPNet, addr1IPNet})
+				gomega.Expect(err).NotTo(gomega.HaveOccurred())
+				var addr1Interface interface{} = cidrAddress1
+				expectedOps, err := ovsdb.NewOvsSet(addr1Interface)
+				gomega.Expect(err).NotTo(gomega.HaveOccurred())
+				gomega.Expect(ops[0].Mutations[0].Value).To(gomega.Equal(expectedOps))
+				// nothing added to address set yet since transact isn't called
+				expectedDatabaseState := getDbAsV4(addrsetDbIDs, []string{})
+				gomega.Eventually(nbClient).Should(libovsdbtest.HaveDataIgnoringUUIDs(expectedDatabaseState))
+				return nil
+			}
+
+			err := app.Run([]string{app.Name})
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		})
+
+		ginkgo.It("gets all CIDRs from an address set", func() {
+			app.Action = func(ctx *cli.Context) error {
+				dbSetup := []libovsdbtest.TestData{
+					getDbAsWithUUID(addrsetDbIDs, []string{cidrAddress1, cidrAddress2}, fakeUUID, ipv4InternalID),
+				}
+				err := testdbCtx.NBServer.CreateTestData(dbSetup)
+				gomega.Expect(err).NotTo(gomega.HaveOccurred())
+
+				_, err = config.InitConfig(ctx, nil, nil)
+				gomega.Expect(err).NotTo(gomega.HaveOccurred())
+				config.IPv4Mode = true
+				asFactory = NewOvnAddressSetFactoryForCIDRs(nbClient, config.IPv4Mode, config.IPv6Mode)
+
+				as, err := asFactory.EnsureAddressSet(addrsetDbIDs)
+				gomega.Expect(err).NotTo(gomega.HaveOccurred())
+
+				cidrsV4, cidrsV6 := as.GetCIDRs()
+
+				gomega.Expect(cidrsV4).To(gomega.ConsistOf([]string{cidrAddress1, cidrAddress2}))
+				gomega.Expect(cidrsV6).To(gomega.BeNil())
+				return nil
+			}
+
+			err := app.Run([]string{app.Name})
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		})
+
+		ginkgo.It("deletes a CIDR from an address set", func() {
+			app.Action = func(ctx *cli.Context) error {
+				const addr1 string = "1.2.1.1/32"
+
+				_, err := config.InitConfig(ctx, nil, nil)
+				gomega.Expect(err).NotTo(gomega.HaveOccurred())
+
+				asFactory = NewOvnAddressSetFactoryForCIDRs(nbClient, config.IPv4Mode, config.IPv6Mode)
+				_, addr1IPNet, err := net.ParseCIDR(addr1)
+				gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+				as, err := asFactory.NewAddressSet(addrsetDbIDs, []*net.IPNet{addr1IPNet})
+				gomega.Expect(err).NotTo(gomega.HaveOccurred())
+
+				err = as.DeleteCIDRs([]*net.IPNet{addr1IPNet})
+				gomega.Expect(err).NotTo(gomega.HaveOccurred())
+
+				// Deleting a non-existent address is a no-op
+				err = as.DeleteCIDRs([]*net.IPNet{addr1IPNet})
+				gomega.Expect(err).NotTo(gomega.HaveOccurred())
+				expectedDatabaseState := getDbAsV4(addrsetDbIDs, nil)
+				gomega.Eventually(nbClient).Should(libovsdbtest.HaveDataIgnoringUUIDs(expectedDatabaseState))
+
+				return nil
+			}
+
+			err := app.Run([]string{app.Name})
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		})
+
+		ginkgo.It("returns ops to delete a CIDR from an address set", func() {
+			app.Action = func(ctx *cli.Context) error {
+				const addr1 string = "1.2.1.1/32"
+
+				_, err := config.InitConfig(ctx, nil, nil)
+				gomega.Expect(err).NotTo(gomega.HaveOccurred())
+
+				asFactory = NewOvnAddressSetFactoryForCIDRs(nbClient, config.IPv4Mode, config.IPv6Mode)
+				_, addr1IPNet, err := net.ParseCIDR(addr1)
+				gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+				as, err := asFactory.NewAddressSet(addrsetDbIDs, []*net.IPNet{addr1IPNet})
+				gomega.Expect(err).NotTo(gomega.HaveOccurred())
+
+				ops, err := as.DeleteCIDRsReturnOps([]*net.IPNet{addr1IPNet})
+				gomega.Expect(err).NotTo(gomega.HaveOccurred())
+				var addr1Interface interface{} = addr1
+				expectedOps, err := ovsdb.NewOvsSet(addr1Interface)
+				gomega.Expect(err).NotTo(gomega.HaveOccurred())
+				gomega.Expect(ops[0].Mutations[0].Value).To(gomega.Equal(expectedOps))
+				// nothing is deleted from address set yet since transact isn't called
+				expectedDatabaseState := getDbAsV4(addrsetDbIDs, []string{addr1})
+				gomega.Eventually(nbClient).Should(libovsdbtest.HaveDataIgnoringUUIDs(expectedDatabaseState))
+
+				return nil
+			}
+
+			err := app.Run([]string{app.Name})
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		})
+
+		ginkgo.It("sets an already set addressSet", func() {
+			app.Action = func(ctx *cli.Context) error {
+				const addr1 string = "1.2.3.1/32"
+				const addr2 string = "2.3.4.1/32"
+				const addr3 string = "7.8.9.10/32"
+
+				_, err := config.InitConfig(ctx, nil, nil)
+				gomega.Expect(err).NotTo(gomega.HaveOccurred())
+
+				asFactory = NewOvnAddressSetFactoryForCIDRs(nbClient, config.IPv4Mode, config.IPv6Mode)
+				_, addr1IPNet, err := net.ParseCIDR(addr1)
+				gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+				as, err := asFactory.NewAddressSet(addrsetDbIDs, []*net.IPNet{addr1IPNet})
+				gomega.Expect(err).NotTo(gomega.HaveOccurred())
+				_, addr2IPNet, err := net.ParseCIDR(addr2)
+				gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+				_, addr3IPNet, err := net.ParseCIDR(addr3)
+				gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+				err = as.SetCIDRs([]*net.IPNet{addr2IPNet, addr3IPNet})
+				gomega.Expect(err).NotTo(gomega.HaveOccurred())
+				expectedDatabaseState := getDbAsV4(addrsetDbIDs, []string{addr2, addr3})
+
+				gomega.Eventually(nbClient).Should(libovsdbtest.HaveDataIgnoringUUIDs(expectedDatabaseState))
+				return nil
+			}
+
+			err := app.Run([]string{app.Name})
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		})
+	})
+
+	ginkgo.Context("Dual stack : when creating an address set object", func() {
+		ginkgo.It("re-uses an existing dual stack address set and replaces CIDRs", func() {
+			app.Action = func(ctx *cli.Context) error {
+				const (
+					addr1 string = "1.2.3.4/32"
+					addr2 string = "5.6.7.8/32"
+					addr3 string = "2001:db8::1/128"
+					addr4 string = "2001:db8::2/128"
+				)
+
+				_, err := config.InitConfig(ctx, nil, nil)
+				gomega.Expect(err).NotTo(gomega.HaveOccurred())
+				config.IPv6Mode = true
+
+				asFactory = NewOvnAddressSetFactoryForCIDRs(nbClient, config.IPv4Mode, config.IPv6Mode)
+				_, addr1IPNet, err := net.ParseCIDR(addr1)
+				gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+				_, addr2IPNet, err := net.ParseCIDR(addr2)
+				gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+				_, addr3IPNet, err := net.ParseCIDR(addr3)
+				gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+				_, addr4IPNet, err := net.ParseCIDR(addr4)
+				gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+				_, err = asFactory.NewAddressSet(addrsetDbIDs, []*net.IPNet{addr1IPNet, addr2IPNet, addr3IPNet, addr4IPNet})
+				gomega.Expect(err).NotTo(gomega.HaveOccurred())
+				expectedDatabaseState := []libovsdbtest.TestData{
+					getDbAddrSets(addrsetDbIDs, ipv4InternalID, []string{addr1, addr2}),
+					getDbAddrSets(addrsetDbIDs, ipv6InternalID, []string{addr3, addr4}),
+				}
+				gomega.Eventually(nbClient).Should(libovsdbtest.HaveDataIgnoringUUIDs(expectedDatabaseState))
+				return nil
+			}
+
+			err := app.Run([]string{app.Name})
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		})
+
+		ginkgo.It("clears an existing address set of dual stack CIDRs", func() {
+			app.Action = func(ctx *cli.Context) error {
+				const (
+					addr1 string = "1.2.3.4/32"
+					addr2 string = "5.6.7.8/32"
+					addr3 string = "2001:db8::1/128"
+					addr4 string = "2001:db8::2/128"
+				)
+				_, err := config.InitConfig(ctx, nil, nil)
+				gomega.Expect(err).NotTo(gomega.HaveOccurred())
+				config.IPv6Mode = true
+
+				asFactory = NewOvnAddressSetFactoryForCIDRs(nbClient, config.IPv4Mode, config.IPv6Mode)
+				_, addr1IPNet, err := net.ParseCIDR(addr1)
+				gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+				_, addr2IPNet, err := net.ParseCIDR(addr2)
+				gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+				_, addr3IPNet, err := net.ParseCIDR(addr3)
+				gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+				_, addr4IPNet, err := net.ParseCIDR(addr4)
+				gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+				_, err = asFactory.NewAddressSet(addrsetDbIDs, []*net.IPNet{addr1IPNet, addr2IPNet, addr3IPNet, addr4IPNet})
+				gomega.Expect(err).NotTo(gomega.HaveOccurred())
+
+				_, err = asFactory.NewAddressSet(addrsetDbIDs, nil)
+				expectedDatabaseState := []libovsdbtest.TestData{
+					getDbAddrSets(addrsetDbIDs, ipv4InternalID, nil),
+					getDbAddrSets(addrsetDbIDs, ipv6InternalID, nil),
+				}
+				gomega.Eventually(nbClient).Should(libovsdbtest.HaveDataIgnoringUUIDs(expectedDatabaseState))
+				return nil
+			}
+
+			err := app.Run([]string{app.Name})
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		})
+
+		ginkgo.It("creates a new address set and sets dual stack CIDRs", func() {
+			app.Action = func(ctx *cli.Context) error {
+				const (
+					addr1 string = "1.2.3.4/32"
+					addr2 string = "5.6.7.8/32"
+					addr3 string = "2001:db8::1/128"
+					addr4 string = "2001:db8::2/128"
+				)
+
+				_, err := config.InitConfig(ctx, nil, nil)
+				gomega.Expect(err).NotTo(gomega.HaveOccurred())
+				config.IPv6Mode = true
+
+				asFactory = NewOvnAddressSetFactoryForCIDRs(nbClient, config.IPv4Mode, config.IPv6Mode)
+				_, addr1IPNet, err := net.ParseCIDR(addr1)
+				gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+				_, addr2IPNet, err := net.ParseCIDR(addr2)
+				gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+				_, addr3IPNet, err := net.ParseCIDR(addr3)
+				gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+				_, addr4IPNet, err := net.ParseCIDR(addr4)
+				gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+				_, err = asFactory.NewAddressSet(addrsetDbIDs, []*net.IPNet{addr1IPNet, addr2IPNet, addr3IPNet, addr4IPNet})
+				gomega.Expect(err).NotTo(gomega.HaveOccurred())
+				expectedDatabaseState := []libovsdbtest.TestData{
+					getDbAddrSets(addrsetDbIDs, ipv4InternalID, []string{addr1, addr2}),
+					getDbAddrSets(addrsetDbIDs, ipv6InternalID, []string{addr3, addr4}),
+				}
+				gomega.Eventually(nbClient).Should(libovsdbtest.HaveDataIgnoringUUIDs(expectedDatabaseState))
+				return nil
+			}
+
+			err := app.Run([]string{app.Name})
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		})
+	})
+
+	ginkgo.It("destroys an dual stack address set", func() {
+		app.Action = func(ctx *cli.Context) error {
+			const (
+				addr1 string = "1.2.3.4/32"
+				addr2 string = "5.6.7.8/32"
+				addr3 string = "2001:db8::1/128"
+				addr4 string = "2001:db8::2/128"
+			)
+			_, err := config.InitConfig(ctx, nil, nil)
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			config.IPv6Mode = true
+
+			asFactory = NewOvnAddressSetFactoryForCIDRs(nbClient, config.IPv4Mode, config.IPv6Mode)
+			_, addr1IPNet, err := net.ParseCIDR(addr1)
+			gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+			_, addr2IPNet, err := net.ParseCIDR(addr2)
+			gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+			_, addr3IPNet, err := net.ParseCIDR(addr3)
+			gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+			_, addr4IPNet, err := net.ParseCIDR(addr4)
+			gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+			as, err := asFactory.NewAddressSet(addrsetDbIDs, []*net.IPNet{addr1IPNet, addr2IPNet, addr3IPNet, addr4IPNet})
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			expectedDatabaseState := []libovsdbtest.TestData{
+				getDbAddrSets(addrsetDbIDs, ipv4InternalID, []string{addr1, addr2}),
+				getDbAddrSets(addrsetDbIDs, ipv6InternalID, []string{addr3, addr4}),
+			}
+			gomega.Eventually(nbClient).Should(libovsdbtest.HaveDataIgnoringUUIDs(expectedDatabaseState))
+
+			err = as.Destroy()
+			expectedDatabaseState = []libovsdbtest.TestData{}
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			gomega.Eventually(nbClient).Should(libovsdbtest.HaveDataIgnoringUUIDs(expectedDatabaseState))
+			return nil
+		}
+
+		err := app.Run([]string{app.Name})
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+	})
+
+	ginkgo.Context("Dual Stack : when manipulating CIDRs in an address set object", func() {
+		ginkgo.It("adds CIDR to an empty dual stack address set", func() {
+			app.Action = func(ctx *cli.Context) error {
+				const addr1 string = "1.2.3.4/32"
+				const addr2 string = "2001:db8::1/128"
+
+				_, err := config.InitConfig(ctx, nil, nil)
+				gomega.Expect(err).NotTo(gomega.HaveOccurred())
+				config.IPv6Mode = true
+
+				asFactory = NewOvnAddressSetFactoryForCIDRs(nbClient, config.IPv4Mode, config.IPv6Mode)
+
+				as, err := asFactory.NewAddressSet(addrsetDbIDs, nil)
+				gomega.Expect(err).NotTo(gomega.HaveOccurred())
+				expectedDatabaseState := []libovsdbtest.TestData{
+					getDbAddrSets(addrsetDbIDs, ipv4InternalID, nil),
+					getDbAddrSets(addrsetDbIDs, ipv6InternalID, nil),
+				}
+				gomega.Eventually(nbClient).Should(libovsdbtest.HaveDataIgnoringUUIDs(expectedDatabaseState))
+				_, addr1IPNet, err := net.ParseCIDR(addr1)
+				gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+				_, addr2IPNet, err := net.ParseCIDR(addr2)
+				gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+				err = as.AddCIDRs([]*net.IPNet{addr1IPNet, addr2IPNet})
+				expectedDatabaseState = []libovsdbtest.TestData{
+					getDbAddrSets(addrsetDbIDs, ipv4InternalID, []string{addr1}),
+					getDbAddrSets(addrsetDbIDs, ipv6InternalID, []string{addr2}),
+				}
+				gomega.Eventually(nbClient).Should(libovsdbtest.HaveDataIgnoringUUIDs(expectedDatabaseState))
+				gomega.Expect(err).NotTo(gomega.HaveOccurred())
+
+				// Re-adding is a no-op
+				err = as.AddCIDRs([]*net.IPNet{addr1IPNet})
+				gomega.Expect(err).NotTo(gomega.HaveOccurred())
+
+				return nil
+			}
+
+			err := app.Run([]string{app.Name})
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		})
+
+		ginkgo.It("deletes a CIDR from an dual stack address set", func() {
+			app.Action = func(ctx *cli.Context) error {
+				const addr1 string = "1.2.3.4/32"
+				const addr2 string = "2001:db8::1/128"
+
+				_, err := config.InitConfig(ctx, nil, nil)
+				gomega.Expect(err).NotTo(gomega.HaveOccurred())
+				config.IPv6Mode = true
+
+				asFactory = NewOvnAddressSetFactoryForCIDRs(nbClient, config.IPv4Mode, config.IPv6Mode)
+				_, addr1IPNet, err := net.ParseCIDR(addr1)
+				gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+				_, addr2IPNet, err := net.ParseCIDR(addr2)
+				gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+				as, err := asFactory.NewAddressSet(addrsetDbIDs, []*net.IPNet{addr1IPNet, addr2IPNet})
+				gomega.Expect(err).NotTo(gomega.HaveOccurred())
+				expectedDatabaseState := []libovsdbtest.TestData{
+					getDbAddrSets(addrsetDbIDs, ipv4InternalID, []string{addr1}),
+					getDbAddrSets(addrsetDbIDs, ipv6InternalID, []string{addr2}),
+				}
+				gomega.Eventually(nbClient).Should(libovsdbtest.HaveDataIgnoringUUIDs(expectedDatabaseState))
+
+				err = as.DeleteCIDRs([]*net.IPNet{addr1IPNet, addr2IPNet})
+				gomega.Expect(err).NotTo(gomega.HaveOccurred())
+				expectedDatabaseState = []libovsdbtest.TestData{
+					getDbAddrSets(addrsetDbIDs, ipv4InternalID, nil),
+					getDbAddrSets(addrsetDbIDs, ipv6InternalID, nil),
+				}
+				gomega.Eventually(nbClient).Should(libovsdbtest.HaveDataIgnoringUUIDs(expectedDatabaseState))
+
+				// Deleting a non-existent address is a no-op
+				err = as.DeleteCIDRs([]*net.IPNet{addr1IPNet})
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 				return nil

@@ -23,6 +23,8 @@ func addKnownTypes(scheme *runtime.Scheme) error {
 	scheme.AddKnownTypes(SchemeGroupVersion,
 		&EgressIP{},
 		&EgressIPList{},
+		&EgressIPTraffic{},
+		&EgressIPTrafficList{},
 	)
 	metav1.AddToGroupVersion(scheme, SchemeGroupVersion)
 	return nil

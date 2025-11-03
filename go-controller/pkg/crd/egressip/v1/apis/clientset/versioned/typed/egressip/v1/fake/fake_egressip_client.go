@@ -31,6 +31,10 @@ func (c *FakeK8sV1) EgressIPs() v1.EgressIPInterface {
 	return &FakeEgressIPs{c}
 }
 
+func (c *FakeK8sV1) EgressIPTraffics() v1.EgressIPTrafficInterface {
+	return &FakeEgressIPTraffics{c}
+}
+
 // RESTClient returns a RESTClient that is used to communicate
 // with API server by this client implementation.
 func (c *FakeK8sV1) RESTClient() rest.Interface {

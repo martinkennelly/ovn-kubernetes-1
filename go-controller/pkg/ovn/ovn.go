@@ -354,6 +354,11 @@ func (oc *DefaultNetworkController) WatchEgressIPPods() error {
 	return err
 }
 
+func (oc *DefaultNetworkController) WatchEgressIPTraffics() error {
+	_, err := oc.retryEgressIPTraffics.WatchResource()
+	return err
+}
+
 // syncNodeGateway ensures a node's gateway router is configured
 func (oc *DefaultNetworkController) syncNodeGateway(node *kapi.Node, hostSubnets []*net.IPNet) error {
 	l3GatewayConfig, err := util.ParseNodeL3GatewayAnnotation(node)
@@ -464,8 +469,8 @@ func (oc *DefaultNetworkController) StartServiceController(wg *sync.WaitGroup, r
 func (oc *DefaultNetworkController) InitEgressServiceZoneController() (*egresssvc_zone.Controller, error) {
 	// If the EgressIP controller is enabled it will take care of creating the
 	// "no reroute" policies - we can pass "noop" functions to the egress service controller.
-	initClusterEgressPolicies := func(libovsdbclient.Client, addressset.AddressSetFactory, string) error { return nil }
-	ensureNodeNoReroutePolicies := func(libovsdbclient.Client, addressset.AddressSetFactory, string, listers.NodeLister) error {
+	initClusterEgressPolicies := func(libovsdbclient.Client, addressset.AddressSetFactoryIPs, string) error { return nil }
+	ensureNodeNoReroutePolicies := func(libovsdbclient.Client, addressset.AddressSetFactoryIPs, string, listers.NodeLister) error {
 		return nil
 	}
 	deleteLegacyDefaultNoRerouteNodePolicies := func(libovsdbclient.Client, string) error { return nil }
@@ -479,7 +484,7 @@ func (oc *DefaultNetworkController) InitEgressServiceZoneController() (*egresssv
 		createDefaultNodeRouteToExternal = libovsdbutil.CreateDefaultRouteToExternal
 	}
 
-	return egresssvc_zone.NewController(DefaultNetworkControllerName, oc.client, oc.nbClient, oc.addressSetFactory,
+	return egresssvc_zone.NewController(DefaultNetworkControllerName, oc.client, oc.nbClient, oc.addressSetFactoryIPs,
 		initClusterEgressPolicies, ensureNodeNoReroutePolicies, deleteLegacyDefaultNoRerouteNodePolicies,
 		createDefaultNodeRouteToExternal,
 		oc.stopChan, oc.watchFactory.EgressServiceInformer(), oc.watchFactory.ServiceCoreInformer(),
@@ -497,7 +502,7 @@ func (oc *DefaultNetworkController) newANPController() error {
 		oc.watchFactory.BANPInformer(),
 		oc.watchFactory.NamespaceCoreInformer(),
 		oc.watchFactory.PodCoreInformer(),
-		oc.addressSetFactory,
+		oc.addressSetFactoryIPs,
 		oc.isPodScheduledinLocalZone,
 		oc.zone,
 		oc.recorder,

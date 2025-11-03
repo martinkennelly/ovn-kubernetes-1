@@ -36,6 +36,10 @@ func ForKind(kind schema.GroupVersionKind) interface{} {
 		return &egressipv1.EgressIPStatusApplyConfiguration{}
 	case v1.SchemeGroupVersion.WithKind("EgressIPStatusItem"):
 		return &egressipv1.EgressIPStatusItemApplyConfiguration{}
+	case v1.SchemeGroupVersion.WithKind("EgressIPTraffic"):
+		return &egressipv1.EgressIPTrafficApplyConfiguration{}
+	case v1.SchemeGroupVersion.WithKind("EgressIPTrafficSpec"):
+		return &egressipv1.EgressIPTrafficSpecApplyConfiguration{}
 
 	}
 	return nil

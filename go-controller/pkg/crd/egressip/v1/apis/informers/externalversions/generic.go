@@ -54,6 +54,8 @@ func (f *sharedInformerFactory) ForResource(resource schema.GroupVersionResource
 	// Group=k8s.ovn.org, Version=v1
 	case v1.SchemeGroupVersion.WithResource("egressips"):
 		return &genericInformer{resource: resource.GroupResource(), informer: f.K8s().V1().EgressIPs().Informer()}, nil
+	case v1.SchemeGroupVersion.WithResource("egressiptraffics"):
+		return &genericInformer{resource: resource.GroupResource(), informer: f.K8s().V1().EgressIPTraffics().Informer()}, nil
 
 	}
 

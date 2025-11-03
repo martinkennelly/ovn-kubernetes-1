@@ -49,7 +49,7 @@ type egressQoSRule struct {
 	priority    int
 	dscp        int
 	destination string
-	addrSet     addressset.AddressSet
+	addrSet     addressset.AddressSetIPs
 	pods        *sync.Map // pods name -> ips in the addrSet
 	podSelector metav1.LabelSelector
 }
@@ -122,8 +122,8 @@ func (oc *DefaultNetworkController) cloneEgressQoSRule(raw egressqosapi.EgressQo
 	return eqr, nil
 }
 
-func (oc *DefaultNetworkController) createASForEgressQoSRule(podSelector metav1.LabelSelector, namespace string, priority int) (addressset.AddressSet, *sync.Map, error) {
-	var addrSet addressset.AddressSet
+func (oc *DefaultNetworkController) createASForEgressQoSRule(podSelector metav1.LabelSelector, namespace string, priority int) (addressset.AddressSetIPs, *sync.Map, error) {
+	var addrSet addressset.AddressSetIPs
 
 	selector, err := metav1.LabelSelectorAsSelector(&podSelector)
 	if err != nil {
@@ -131,7 +131,7 @@ func (oc *DefaultNetworkController) createASForEgressQoSRule(podSelector metav1.
 	}
 	if selector.Empty() { // empty selector means that the rule applies to all pods in the namespace
 		asIndex := getNamespaceAddrSetDbIDs(namespace, oc.controllerName)
-		addrSet, err := oc.addressSetFactory.EnsureAddressSet(asIndex)
+		addrSet, err := oc.addressSetFactoryIPs.EnsureAddressSet(asIndex)
 		if err != nil {
 			return nil, nil, fmt.Errorf("cannot ensure that addressSet for namespace %s exists %v", namespace, err)
 		}
@@ -145,7 +145,7 @@ func (oc *DefaultNetworkController) createASForEgressQoSRule(podSelector metav1.
 		return nil, nil, err
 	}
 	asIndex := getEgressQosAddrSetDbIDs(namespace, fmt.Sprintf("%d", priority), oc.controllerName)
-	addrSet, err = oc.addressSetFactory.EnsureAddressSet(asIndex)
+	addrSet, err = oc.addressSetFactoryIPs.EnsureAddressSet(asIndex)
 	if err != nil {
 		return nil, nil, err
 	}

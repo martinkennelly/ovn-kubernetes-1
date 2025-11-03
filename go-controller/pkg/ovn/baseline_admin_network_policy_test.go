@@ -64,7 +64,7 @@ func getACLsForBANPRules(banp *anpapi.BaselineAdminNetworkPolicy) []*nbdb.ACL {
 func buildBANPAddressSets(banp *anpapi.BaselineAdminNetworkPolicy, index int32, ips []net.IP, gressPrefix libovsdbutil.ACLDirection) (*nbdb.AddressSet, *nbdb.AddressSet) {
 	asIndex := anpovn.GetANPPeerAddrSetDbIDs(banp.Name, string(gressPrefix),
 		fmt.Sprintf("%d", index), DefaultNetworkControllerName, true)
-	return addressset.GetTestDbAddrSets(asIndex, ips)
+	return addressset.GetTestDbAddrSetsIPs(asIndex, ips)
 }
 
 var _ = ginkgo.Describe("OVN BANP Operations", func() {

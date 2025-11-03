@@ -23,7 +23,7 @@ type EgressDNS struct {
 	// this map holds dnsNames to the dnsEntries
 	dnsEntries map[string]*dnsEntry
 	// allows for the creation of addresssets
-	addressSetFactory addressset.AddressSetFactory
+	addressSetFactory addressset.AddressSetFactoryIPs
 	controllerName    string
 
 	// Report change when Add operation is done
@@ -40,7 +40,7 @@ type dnsEntry struct {
 	// NOTE: used for testing
 	dnsResolves []net.IP
 	// the addressSet that contains the current IPs
-	dnsAddressSet addressset.AddressSet
+	dnsAddressSet addressset.AddressSetIPs
 }
 
 func getEgressFirewallDNSAddrSetDbIDs(dnsName, controller string) *libovsdbops.DbObjectIDs {
@@ -51,7 +51,7 @@ func getEgressFirewallDNSAddrSetDbIDs(dnsName, controller string) *libovsdbops.D
 		})
 }
 
-func NewEgressDNS(addressSetFactory addressset.AddressSetFactory, controllerName string,
+func NewEgressDNS(addressSetFactory addressset.AddressSetFactoryIPs, controllerName string,
 	controllerStop <-chan struct{}) (*EgressDNS, error) {
 	dnsInfo, err := util.NewDNS("/etc/resolv.conf")
 	if err != nil {
@@ -73,7 +73,7 @@ func NewEgressDNS(addressSetFactory addressset.AddressSetFactory, controllerName
 	return egressDNS, nil
 }
 
-func (e *EgressDNS) Add(namespace, dnsName string) (addressset.AddressSet, error) {
+func (e *EgressDNS) Add(namespace, dnsName string) (addressset.AddressSetIPs, error) {
 	e.lock.Lock()
 	defer e.lock.Unlock()
 
@@ -83,7 +83,7 @@ func (e *EgressDNS) Add(namespace, dnsName string) (addressset.AddressSet, error
 			namespaces: make(map[string]struct{}),
 		}
 		if e.addressSetFactory == nil {
-			return nil, fmt.Errorf("error adding EgressFirewall DNS rule for host %s, in namespace %s: addressSetFactory is nil", dnsName, namespace)
+			return nil, fmt.Errorf("error adding EgressFirewall DNS rule for host %s, in namespace %s: addressSetFactoryIPs is nil", dnsName, namespace)
 		}
 		asIndex := getEgressFirewallDNSAddrSetDbIDs(dnsName, e.controllerName)
 		dnsEntry.dnsAddressSet, err = e.addressSetFactory.NewAddressSet(asIndex, nil)

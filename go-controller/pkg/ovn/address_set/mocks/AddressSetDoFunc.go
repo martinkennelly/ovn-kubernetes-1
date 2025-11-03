@@ -13,11 +13,11 @@ type AddressSetDoFunc struct {
 }
 
 // Execute provides a mock function with given fields: as
-func (_m *AddressSetDoFunc) Execute(as addressset.AddressSet) error {
+func (_m *AddressSetDoFunc) Execute(as addressset.AddressSetIPs) error {
 	ret := _m.Called(as)
 
 	var r0 error
-	if rf, ok := ret.Get(0).(func(addressset.AddressSet) error); ok {
+	if rf, ok := ret.Get(0).(func(addressset.AddressSetIPs) error); ok {
 		r0 = rf(as)
 	} else {
 		r0 = ret.Error(0)
